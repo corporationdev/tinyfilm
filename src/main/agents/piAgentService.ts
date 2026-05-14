@@ -9,7 +9,7 @@ import type {
 } from '../../shared/contracts/app'
 import { getProject } from '../projects/projectRepository'
 import { emitPiAgentEvent } from './piAgentEvents'
-import { createPiVideoViewExtension } from './piVideoViewExtension'
+import { createPiMediaViewExtension } from './piMediaViewExtension'
 
 interface RuntimeRecord {
   projectId: string
@@ -317,7 +317,7 @@ async function ensureRuntime(input: {
     cwd: input.rootPath,
     agentDir,
     settingsManager,
-    extensionFactories: [createPiVideoViewExtension()]
+    extensionFactories: [createPiMediaViewExtension()]
   })
   await resourceLoader.reload()
   const forcedModel = getForcedPiModel(modelRegistry)
@@ -667,8 +667,8 @@ function toolLabel(toolName: string): string {
     return 'Running bash'
   }
 
-  if (toolName === 'view_video') {
-    return 'Viewing video'
+  if (toolName === 'view_media') {
+    return 'Viewing media'
   }
 
   if (/read/i.test(toolName)) {

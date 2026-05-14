@@ -4,11 +4,14 @@ import { FileState, GoogleGenAI, type File as GeminiFile } from '@google/genai'
 import type { ExtensionFactory } from '@earendil-works/pi-coding-agent'
 import { recordPreviewClip } from '../hyperframes/previewRecorder'
 
-interface PendingVideo {
+type MediaKind = 'video' | 'audio' | 'image'
+
+interface PendingMedia {
   path: string
   mimeType: string
   displayName: string
   source: string
+  kind: MediaKind
   cleanupDir?: string
   startSeconds?: number
   endSeconds?: number
@@ -34,7 +37,9 @@ const supportedVideoMimeTypes = new Map<string, string>([
   ['.mp4', 'video/mp4'],
   ['.mpeg', 'video/mpeg'],
   ['.mov', 'video/mov'],
+  ['.m4v', 'video/mp4'],
   ['.avi', 'video/avi'],
+  ['.mkv', 'video/x-matroska'],
   ['.flv', 'video/x-flv'],
   ['.mpg', 'video/mpg'],
   ['.webm', 'video/webm'],
@@ -43,9 +48,32 @@ const supportedVideoMimeTypes = new Map<string, string>([
   ['.3gpp', 'video/3gpp']
 ])
 
+const supportedAudioMimeTypes = new Map<string, string>([
+  ['.mp3', 'audio/mpeg'],
+  ['.wav', 'audio/wav'],
+  ['.aiff', 'audio/aiff'],
+  ['.aif', 'audio/aiff'],
+  ['.aac', 'audio/aac'],
+  ['.ogg', 'audio/ogg'],
+  ['.oga', 'audio/ogg'],
+  ['.opus', 'audio/ogg'],
+  ['.flac', 'audio/flac'],
+  ['.m4a', 'audio/mp4']
+])
+
+const supportedImageMimeTypes = new Map<string, string>([
+  ['.png', 'image/png'],
+  ['.jpg', 'image/jpeg'],
+  ['.jpeg', 'image/jpeg'],
+  ['.gif', 'image/gif'],
+  ['.webp', 'image/webp'],
+  ['.heic', 'image/heic'],
+  ['.heif', 'image/heif']
+])
+
 const previewSource = 'preview'
 
-const videoParameterSchema = {
+const mediaParameterSchema = {
   type: 'object',
   additionalProperties: false,
   required: ['source'],
@@ -53,86 +81,95 @@ const videoParameterSchema = {
     source: {
       type: 'string',
       description:
-        'Video source to inspect. Use "preview" for the active Tinyfilm preview, or provide any local video file path on this machine, relative to the project root or absolute.'
+        'Media source to inspect. Use "preview" for the active Tinyfilm preview video, or provide a local image, audio, or video file path relative to the project root or absolute.'
     },
     startSeconds: {
       type: 'number',
-      description: 'Optional start offset in seconds for the video segment to inspect.'
+      description:
+        'Optional start offset in seconds for video files or the active preview. Ignored for image and audio files.'
     },
     endSeconds: {
       type: 'number',
-      description: 'Optional end offset in seconds for the video segment to inspect.'
+      description:
+        'Optional end offset in seconds for video files or the active preview. Ignored for image and audio files.'
     },
     fps: {
       type: 'number',
-      description: 'Optional frame sampling rate for Gemini video processing, such as 1 or 5.'
+      description:
+        'Optional frame sampling rate for video files or the active preview, such as 1 or 5. Ignored for image and audio files.'
     }
   }
 } as const
 
-interface ViewVideoParams {
+interface ViewMediaParams {
   source: string
   startSeconds?: number
   endSeconds?: number
   fps?: number
 }
 
-export function createPiVideoViewExtension(): ExtensionFactory {
-  const pendingBySessionId = new Map<string, PendingVideo[]>()
+export function createPiMediaViewExtension(): ExtensionFactory {
+  const pendingBySessionId = new Map<string, PendingMedia[]>()
 
   return (pi) => {
     pi.registerTool({
-      name: 'view_video',
-      label: 'View video',
+      name: 'view_media',
+      label: 'View media',
       description:
-        'View video natively with Gemini on the next reasoning turn. Use source "preview" to record and inspect the active Tinyfilm preview with audio, or use a local path to inspect any video file on this machine.',
+        'Attach a project media file directly to the next Gemini reasoning turn. The source is auto-detected from the file type and may be an image, audio file, video file, or "preview" for the active Tinyfilm preview video.',
       promptSnippet:
-        'view_video: View video natively with Gemini. Set source to "preview" for the active Tinyfilm preview, or to a local video file path.',
+        'view_media: Attach media directly to Gemini context. Set source to "preview" for the active Tinyfilm preview video, or to a local image, audio, or video file path.',
       promptGuidelines: [
-        'Use view_video when you need to inspect footage directly; the video will be available on the next model turn.',
-        'Use source "preview" when the user asks about the current or active preview. Use a local file path as source when the user asks about a specific video file.'
+        'Use view_media only when you need to inspect the actual media contents, not merely list or reference an asset path.',
+        'Use source "preview" when the user asks about the current or active Tinyfilm preview; preview is always treated as video.',
+        'Use a local path when the user asks about an imported image, audio, or video asset. The tool detects the media type from the file extension.',
+        'For long video files, prefer a short segment with startSeconds/endSeconds/fps before inspecting the whole file.'
       ],
-      parameters: videoParameterSchema,
+      parameters: mediaParameterSchema,
       executionMode: 'sequential',
-      async execute(_toolCallId, params: ViewVideoParams, _signal, _onUpdate, ctx) {
-        validateVideoOptions(params)
-        const resolvedVideo = await resolveVideoSource(ctx.cwd, params)
+      async execute(_toolCallId, params: ViewMediaParams, _signal, _onUpdate, ctx) {
+        validateMediaOptions(params)
+        const resolvedMedia = await resolveMediaSource(ctx.cwd, params)
 
-        const pendingVideo: PendingVideo = {
-          path: resolvedVideo.path,
-          mimeType: resolvedVideo.mimeType,
-          displayName: resolvedVideo.displayName,
+        const pendingMedia: PendingMedia = {
+          path: resolvedMedia.path,
+          mimeType: resolvedMedia.mimeType,
+          displayName: resolvedMedia.displayName,
+          kind: resolvedMedia.kind,
           source: params.source,
-          ...(resolvedVideo.cleanupDir ? { cleanupDir: resolvedVideo.cleanupDir } : {}),
-          ...(resolvedVideo.useGeminiMetadata && params.startSeconds !== undefined
+          ...(resolvedMedia.cleanupDir ? { cleanupDir: resolvedMedia.cleanupDir } : {}),
+          ...(resolvedMedia.useGeminiVideoMetadata && params.startSeconds !== undefined
             ? { startSeconds: params.startSeconds }
             : {}),
-          ...(resolvedVideo.useGeminiMetadata && params.endSeconds !== undefined
+          ...(resolvedMedia.useGeminiVideoMetadata && params.endSeconds !== undefined
             ? { endSeconds: params.endSeconds }
             : {}),
-          ...(params.fps !== undefined ? { fps: params.fps } : {})
+          ...(resolvedMedia.useGeminiVideoMetadata && params.fps !== undefined
+            ? { fps: params.fps }
+            : {})
         }
 
         const sessionId = ctx.sessionManager.getSessionId()
         pendingBySessionId.set(sessionId, [
           ...(pendingBySessionId.get(sessionId) ?? []),
-          pendingVideo
+          pendingMedia
         ])
 
         return {
           content: [
             {
               type: 'text',
-              text: `Viewing ${pendingVideo.displayName}`
+              text: `Viewing ${pendingMedia.displayName}`
             }
           ],
           details: {
-            source: pendingVideo.source,
-            path: pendingVideo.path,
-            mimeType: pendingVideo.mimeType,
-            startSeconds: pendingVideo.startSeconds,
-            endSeconds: pendingVideo.endSeconds,
-            fps: pendingVideo.fps
+            source: pendingMedia.source,
+            path: pendingMedia.path,
+            kind: pendingMedia.kind,
+            mimeType: pendingMedia.mimeType,
+            startSeconds: pendingMedia.startSeconds,
+            endSeconds: pendingMedia.endSeconds,
+            fps: pendingMedia.fps
           }
         }
       }
@@ -144,8 +181,8 @@ export function createPiVideoViewExtension(): ExtensionFactory {
       }
 
       const sessionId = ctx.sessionManager.getSessionId()
-      const pendingVideos = pendingBySessionId.get(sessionId)
-      if (!pendingVideos?.length) {
+      const pendingMedia = pendingBySessionId.get(sessionId)
+      if (!pendingMedia?.length) {
         return undefined
       }
 
@@ -168,23 +205,23 @@ export function createPiVideoViewExtension(): ExtensionFactory {
       const uploadedParts: Array<Record<string, unknown>> = []
       try {
         const signal = asAbortSignal(ctx.signal)
-        for (const video of pendingVideos) {
-          const uploaded = await uploadAndWaitForVideo(ai, video, signal)
-          uploadedParts.push(filePartForVideo(uploaded, video))
+        for (const media of pendingMedia) {
+          const uploaded = await uploadAndWaitForMedia(ai, media, signal)
+          uploadedParts.push(filePartForMedia(uploaded, media))
         }
       } catch (error) {
-        console.error('[pi-video:view_video:uploadFailed]', {
+        console.error('[pi-media:view_media:uploadFailed]', {
           sessionId,
           error
         })
         pendingBySessionId.delete(sessionId)
-        await cleanupResolvedVideos(pendingVideos)
+        await cleanupResolvedMedia(pendingMedia)
         throw error
       }
 
-      appendVideoUserTurnAfterToolResult(payload, uploadedParts)
+      appendMediaUserTurnAfterToolResult(payload, uploadedParts)
       pendingBySessionId.delete(sessionId)
-      await cleanupResolvedVideos(pendingVideos)
+      await cleanupResolvedMedia(pendingMedia)
       return payload
     })
 
@@ -196,21 +233,22 @@ export function createPiVideoViewExtension(): ExtensionFactory {
   }
 }
 
-type ResolvedVideoSource = {
+type ResolvedMediaSource = {
   path: string
   mimeType: string
   displayName: string
+  kind: MediaKind
   cleanupDir?: string
-  useGeminiMetadata: boolean
+  useGeminiVideoMetadata: boolean
 }
 
-async function resolveVideoSource(
+async function resolveMediaSource(
   cwd: string,
-  params: ViewVideoParams
-): Promise<ResolvedVideoSource> {
+  params: ViewMediaParams
+): Promise<ResolvedMediaSource> {
   const source = params.source.trim()
   if (!source) {
-    throw new Error('Video source is required')
+    throw new Error('Media source is required')
   }
 
   if (source === previewSource) {
@@ -222,23 +260,26 @@ async function resolveVideoSource(
     })
     return {
       ...recorded,
-      useGeminiMetadata: false
+      kind: 'video',
+      useGeminiVideoMetadata: false
     }
   }
 
-  const filePath = await resolveVideoPath(cwd, source)
+  const filePath = await resolveMediaPath(cwd, source)
+  const mediaType = mediaTypeForPath(filePath)
   return {
     path: filePath,
-    mimeType: mimeTypeForVideoPath(filePath),
+    mimeType: mediaType.mimeType,
     displayName: basename(filePath),
-    useGeminiMetadata: true
+    kind: mediaType.kind,
+    useGeminiVideoMetadata: mediaType.kind === 'video'
   }
 }
 
-async function resolveVideoPath(cwd: string, inputPath: string): Promise<string> {
+async function resolveMediaPath(cwd: string, inputPath: string): Promise<string> {
   const trimmed = inputPath.trim()
   if (!trimmed) {
-    throw new Error('Video path is required')
+    throw new Error('Media path is required')
   }
 
   const filePath = isAbsolute(trimmed) ? trimmed : resolve(cwd, trimmed)
@@ -246,18 +287,20 @@ async function resolveVideoPath(cwd: string, inputPath: string): Promise<string>
 
   const stats = await stat(filePath)
   if (!stats.isFile()) {
-    throw new Error(`Video path is not a file: ${filePath}`)
+    throw new Error(`Media path is not a file: ${filePath}`)
   }
 
-  mimeTypeForVideoPath(filePath)
+  mediaTypeForPath(filePath)
   return filePath
 }
 
-async function cleanupResolvedVideos(videos: PendingVideo[]): Promise<void> {
+async function cleanupResolvedMedia(mediaItems: PendingMedia[]): Promise<void> {
   await Promise.allSettled(
-    Array.from(new Set(videos.map((video) => video.cleanupDir).filter(isString))).map((dir) => {
-      return rm(dir, { recursive: true, force: true })
-    })
+    Array.from(new Set(mediaItems.map((media) => media.cleanupDir).filter(isString))).map(
+      (dir) => {
+        return rm(dir, { recursive: true, force: true })
+      }
+    )
   )
 }
 
@@ -265,16 +308,29 @@ function isString(value: string | undefined): value is string {
   return typeof value === 'string'
 }
 
-function mimeTypeForVideoPath(filePath: string): string {
+function mediaTypeForPath(filePath: string): { kind: MediaKind; mimeType: string } {
   const extension = extname(filePath).toLowerCase()
-  const mimeType = supportedVideoMimeTypes.get(extension)
-  if (!mimeType) {
-    throw new Error(`Unsupported Gemini video file type: ${extension || '(no extension)'}`)
+  const videoMimeType = supportedVideoMimeTypes.get(extension)
+  if (videoMimeType) {
+    return { kind: 'video', mimeType: videoMimeType }
   }
-  return mimeType
+
+  const audioMimeType = supportedAudioMimeTypes.get(extension)
+  if (audioMimeType) {
+    return { kind: 'audio', mimeType: audioMimeType }
+  }
+
+  const imageMimeType = supportedImageMimeTypes.get(extension)
+  if (imageMimeType) {
+    return { kind: 'image', mimeType: imageMimeType }
+  }
+
+  throw new Error(
+    `Unsupported Gemini media file type: ${extension || '(no extension)'}. Supported media types are image, audio, and video files.`
+  )
 }
 
-function validateVideoOptions(input: {
+function validateMediaOptions(input: {
   startSeconds?: number
   endSeconds?: number
   fps?: number
@@ -319,9 +375,9 @@ function normalizeGeminiAbortSignal(payload: GeminiPayload): void {
   }
 }
 
-function appendVideoUserTurnAfterToolResult(
+function appendMediaUserTurnAfterToolResult(
   payload: GeminiPayload,
-  videoParts: Array<Record<string, unknown>>
+  mediaParts: Array<Record<string, unknown>>
 ): void {
   const contents = payload.contents
   if (!Array.isArray(contents)) {
@@ -329,7 +385,7 @@ function appendVideoUserTurnAfterToolResult(
   }
 
   const functionResponseIndex = findLastContentIndex(contents, (part) => {
-    return (part as GeminiFunctionResponsePart).functionResponse?.name === 'view_video'
+    return (part as GeminiFunctionResponsePart).functionResponse?.name === 'view_media'
   })
 
   const insertionIndex = functionResponseIndex >= 0 ? functionResponseIndex + 1 : contents.length
@@ -337,9 +393,9 @@ function appendVideoUserTurnAfterToolResult(
     role: 'user',
     parts: [
       {
-        text: 'Video attached from the view_video tool. Inspect the footage directly now and continue from the tool result.'
+        text: 'Media attached from the view_media tool. Inspect the media directly now and continue from the tool result.'
       },
-      ...videoParts
+      ...mediaParts
     ]
   })
 }
@@ -362,17 +418,17 @@ function findLastContentIndex(
   return -1
 }
 
-async function uploadAndWaitForVideo(
+async function uploadAndWaitForMedia(
   ai: GoogleGenAI,
-  video: PendingVideo,
+  media: PendingMedia,
   signal: AbortSignal | undefined
 ): Promise<GeminiFile> {
   throwIfAborted(signal)
   const uploaded = await ai.files.upload({
-    file: video.path,
+    file: media.path,
     config: {
-      mimeType: video.mimeType,
-      displayName: video.displayName
+      mimeType: media.mimeType,
+      displayName: media.displayName
     }
   })
 
@@ -384,7 +440,7 @@ async function uploadAndWaitForVideo(
   const startedAt = Date.now()
   while (current.state === FileState.PROCESSING || current.state === FileState.STATE_UNSPECIFIED) {
     if (Date.now() - startedAt > 5 * 60 * 1000) {
-      throw new Error(`Timed out waiting for Gemini to process ${video.displayName}`)
+      throw new Error(`Timed out waiting for Gemini to process ${media.displayName}`)
     }
 
     await sleep(2000, signal)
@@ -392,7 +448,7 @@ async function uploadAndWaitForVideo(
   }
 
   if (current.state === FileState.FAILED) {
-    throw new Error(`Gemini failed to process ${video.displayName}`)
+    throw new Error(`Gemini failed to process ${media.displayName}`)
   }
 
   if (!current.uri) {
@@ -402,27 +458,28 @@ async function uploadAndWaitForVideo(
   return current
 }
 
-function filePartForVideo(file: GeminiFile, video: PendingVideo): Record<string, unknown> {
+function filePartForMedia(file: GeminiFile, media: PendingMedia): Record<string, unknown> {
   return {
     fileData: {
       fileUri: file.uri,
-      mimeType: file.mimeType ?? video.mimeType
+      mimeType: file.mimeType ?? media.mimeType
     },
-    ...(hasVideoMetadata(video) ? { videoMetadata: videoMetadata(video) } : {})
+    ...(hasVideoMetadata(media) ? { videoMetadata: videoMetadata(media) } : {})
   }
 }
 
-function hasVideoMetadata(video: PendingVideo): boolean {
+function hasVideoMetadata(media: PendingMedia): boolean {
   return (
-    video.startSeconds !== undefined || video.endSeconds !== undefined || video.fps !== undefined
+    media.kind === 'video' &&
+    (media.startSeconds !== undefined || media.endSeconds !== undefined || media.fps !== undefined)
   )
 }
 
-function videoMetadata(video: PendingVideo): Record<string, unknown> {
+function videoMetadata(media: PendingMedia): Record<string, unknown> {
   return {
-    ...(video.startSeconds !== undefined ? { startOffset: `${video.startSeconds}s` } : {}),
-    ...(video.endSeconds !== undefined ? { endOffset: `${video.endSeconds}s` } : {}),
-    ...(video.fps !== undefined ? { fps: video.fps } : {})
+    ...(media.startSeconds !== undefined ? { startOffset: `${media.startSeconds}s` } : {}),
+    ...(media.endSeconds !== undefined ? { endOffset: `${media.endSeconds}s` } : {}),
+    ...(media.fps !== undefined ? { fps: media.fps } : {})
   }
 }
 
@@ -434,7 +491,7 @@ function sleep(ms: number, signal: AbortSignal | undefined): Promise<void> {
       'abort',
       () => {
         clearTimeout(timeout)
-        reject(new Error('Gemini video upload was aborted'))
+        reject(new Error('Gemini media upload was aborted'))
       },
       { once: true }
     )
@@ -443,7 +500,7 @@ function sleep(ms: number, signal: AbortSignal | undefined): Promise<void> {
 
 function throwIfAborted(signal: AbortSignal | undefined): void {
   if (signal?.aborted) {
-    throw new Error('Gemini video upload was aborted')
+    throw new Error('Gemini media upload was aborted')
   }
 }
 
