@@ -8,6 +8,7 @@
         "@earendil-works/pi-coding-agent": "^0.74.0",
         "@electron-toolkit/preload": "^3.0.2",
         "@electron-toolkit/utils": "^4.0.0",
+        "@google/genai": "^1.52.0",
         "@hyperframes/player": "^0.6.6",
         "@orpc/client": "^1.14.3",
         "@orpc/contract": "^1.14.3",

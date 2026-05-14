@@ -21,6 +21,7 @@ export function AgentPanel(props: {
   onRunCompleted: () => void
   onOpenSettings: () => void
 }): React.JSX.Element {
+  const { onOpenSettings, onRunCompleted, onSelectChat, projectId, selectedSessionId } = props
   const queryClient = useQueryClient()
   const [message, setMessage] = useState('')
   const [isHistoryOpen, setIsHistoryOpen] = useState(false)
@@ -31,17 +32,28 @@ export function AgentPanel(props: {
   const [agentError, setAgentError] = useState<string | null>(null)
   const transcriptEndRef = useRef<HTMLDivElement | null>(null)
   const optimisticSessionRef = useRef<string | undefined>(undefined)
+  const suppressAutoSelectRef = useRef(false)
   const authStatusQuery = useQuery(orpc.agents.getGeminiAuthStatus.queryOptions())
   const chatsQuery = useQuery(
     orpc.agents.listChats.queryOptions({
-      input: { projectId: props.projectId }
+      input: { projectId }
     })
   )
   const chats = useMemo(() => chatsQuery.data ?? [], [chatsQuery.data])
-  const selectedSessionId = props.selectedSessionId
+  const mostRecentChat = useMemo(
+    () =>
+      chats.reduce<PiAgentChat | null>((latest, chat) => {
+        if (!latest) {
+          return chat
+        }
+
+        return Date.parse(chat.updatedAt) > Date.parse(latest.updatedAt) ? chat : latest
+      }, null),
+    [chats]
+  )
   const openChatQuery = useQuery(
     orpc.agents.openChat.queryOptions({
-      input: { projectId: props.projectId, sessionId: selectedSessionId ?? '' },
+      input: { projectId, sessionId: selectedSessionId ?? '' },
       enabled: Boolean(selectedSessionId)
     })
   )
@@ -90,6 +102,23 @@ export function AgentPanel(props: {
   const currentChatTitle = selectedChat?.title ?? 'New chat'
 
   useEffect(() => {
+    suppressAutoSelectRef.current = false
+  }, [projectId])
+
+  useEffect(() => {
+    if (
+      selectedSessionId ||
+      chatsQuery.isPending ||
+      suppressAutoSelectRef.current ||
+      !mostRecentChat
+    ) {
+      return
+    }
+
+    onSelectChat(mostRecentChat.id)
+  }, [chatsQuery.isPending, mostRecentChat, onSelectChat, selectedSessionId])
+
+  useEffect(() => {
     queueMicrotask(() => {
       setMessage('')
       setIsHistoryOpen(false)
@@ -106,7 +135,7 @@ export function AgentPanel(props: {
 
   useEffect(() => {
     const unsubscribe = window.api.onPiAgentEvent((event) => {
-      if (event.projectId !== props.projectId) {
+      if (event.projectId !== projectId) {
         return
       }
 
@@ -130,7 +159,7 @@ export function AgentPanel(props: {
 
         if (event.status === 'idle') {
           setOptimisticTranscript((items) => items.filter((item) => !isThinkingActivity(item)))
-          props.onRunCompleted()
+          onRunCompleted()
         }
       }
 
@@ -140,7 +169,7 @@ export function AgentPanel(props: {
     })
 
     return unsubscribe
-  }, [props, queryClient, selectedSessionId])
+  }, [onRunCompleted, projectId, queryClient, selectedSessionId])
 
   useEffect(() => {
     transcriptEndRef.current?.scrollIntoView({ block: 'end' })
@@ -181,18 +210,18 @@ export function AgentPanel(props: {
           selectedSessionId ??
           (
             await createChat.mutateAsync({
-              projectId: props.projectId,
+              projectId,
               title: titleFromMessage(text)
             })
           ).id
 
         if (!selectedSessionId) {
           optimisticSessionRef.current = sessionId
-          props.onSelectChat(sessionId)
+          onSelectChat(sessionId)
         }
 
         await sendMessage.mutateAsync({
-          projectId: props.projectId,
+          projectId,
           sessionId,
           text
         })
@@ -215,7 +244,8 @@ export function AgentPanel(props: {
     setExpandedToolIds(new Set())
     setLiveStatus(null)
     setAgentError(null)
-    props.onSelectChat(undefined)
+    suppressAutoSelectRef.current = true
+    onSelectChat(undefined)
   }
 
   return (
@@ -230,7 +260,7 @@ export function AgentPanel(props: {
         onHistoryOpenChange={setIsHistoryOpen}
         onNewChat={handleNewChat}
         onSelectChat={(sessionId) => {
-          props.onSelectChat(sessionId)
+          onSelectChat(sessionId)
           setIsHistoryOpen(false)
         }}
       />
@@ -262,7 +292,7 @@ export function AgentPanel(props: {
       />
 
       {needsGeminiKey ? (
-        <GeminiKeyRequired onOpenSettings={props.onOpenSettings} />
+        <GeminiKeyRequired onOpenSettings={onOpenSettings} />
       ) : (
         <AgentComposer
           cancelPending={cancelRun.isPending}
@@ -276,7 +306,7 @@ export function AgentPanel(props: {
             if (!selectedSessionId) {
               return
             }
-            cancelRun.mutate({ projectId: props.projectId, sessionId: selectedSessionId })
+            cancelRun.mutate({ projectId, sessionId: selectedSessionId })
           }}
           onMessageChange={setMessage}
           onSubmit={handleSend}

@@ -9,6 +9,7 @@ import type {
 } from '../../shared/contracts/app'
 import { getProject } from '../projects/projectRepository'
 import { emitPiAgentEvent } from './piAgentEvents'
+import { createPiVideoViewExtension } from './piVideoViewExtension'
 
 interface RuntimeRecord {
   projectId: string
@@ -45,8 +46,12 @@ type PiSessionManager = ReturnType<PiModule['SessionManager']['create']>
 type PiAuthStorage = ReturnType<PiModule['AuthStorage']['create']>
 type PiModelRegistry = ReturnType<PiModule['ModelRegistry']['create']>
 
+const FORCED_PI_MODEL_PROVIDER = 'google'
+const FORCED_PI_MODEL_ID = 'gemini-3.1-pro-preview'
+
 interface PiDeps {
   pi: PiModule
+  agentDir: string
   authStorage: PiAuthStorage
   modelRegistry: PiModelRegistry
 }
@@ -61,7 +66,7 @@ function getPiDeps(): Promise<PiDeps> {
     const authStorage = pi.AuthStorage.create(join(agentDir, 'auth.json'))
     const modelRegistry = pi.ModelRegistry.create(authStorage, join(agentDir, 'models.json'))
 
-    return { pi, authStorage, modelRegistry }
+    return { pi, agentDir, authStorage, modelRegistry }
   })
 
   return piDepsPromise
@@ -304,13 +309,27 @@ async function ensureRuntime(input: {
     return existing
   }
 
-  const { pi, authStorage, modelRegistry } = await getPiDeps()
+  const { pi, agentDir, authStorage, modelRegistry } = await getPiDeps()
   const sessionManager =
     input.sessionManager ?? pi.SessionManager.open(input.sessionFilePath, undefined, input.rootPath)
+  const settingsManager = pi.SettingsManager.create(input.rootPath, agentDir)
+  const resourceLoader = new pi.DefaultResourceLoader({
+    cwd: input.rootPath,
+    agentDir,
+    settingsManager,
+    extensionFactories: [createPiVideoViewExtension()]
+  })
+  await resourceLoader.reload()
+  const forcedModel = getForcedPiModel(modelRegistry)
+
   const { session } = await pi.createAgentSession({
     cwd: input.rootPath,
     authStorage,
     modelRegistry,
+    model: forcedModel,
+    scopedModels: [{ model: forcedModel }],
+    settingsManager,
+    resourceLoader,
     sessionManager
   })
 
@@ -648,6 +667,10 @@ function toolLabel(toolName: string): string {
     return 'Running bash'
   }
 
+  if (toolName === 'view_video') {
+    return 'Viewing video'
+  }
+
   if (/read/i.test(toolName)) {
     return 'Reading file'
   }
@@ -694,4 +717,17 @@ function truncate(value: string, limit: number): string {
 
 function nowIso(): string {
   return new Date().toISOString()
+}
+
+function getForcedPiModel(
+  modelRegistry: PiModelRegistry
+): NonNullable<ReturnType<PiModelRegistry['find']>> {
+  const model = modelRegistry.find(FORCED_PI_MODEL_PROVIDER, FORCED_PI_MODEL_ID)
+  if (!model) {
+    throw new Error(
+      `Required Pi model is not available: ${FORCED_PI_MODEL_PROVIDER}/${FORCED_PI_MODEL_ID}`
+    )
+  }
+
+  return model
 }
