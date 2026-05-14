@@ -23,7 +23,25 @@ function copyMainMigrations(): Plugin {
 
 export default defineConfig({
   main: {
-    plugins: [copyMainMigrations()]
+    build: {
+      externalizeDeps: {
+        exclude: []
+      },
+      rollupOptions: {
+        output: {
+          format: 'cjs'
+        }
+      }
+    },
+    plugins: [copyMainMigrations()],
+    ssr: {
+      noExternal: [
+        '@earendil-works/pi-coding-agent',
+        '@earendil-works/pi-agent-core',
+        '@earendil-works/pi-ai',
+        '@earendil-works/pi-tui'
+      ]
+    }
   },
   preload: {},
   renderer: {

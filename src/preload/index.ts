@@ -1,9 +1,32 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
+import type { PiAgentUiEvent } from '../main/agents/piAgentEvents'
 
 // Custom APIs for renderer
 const api = {
-  getPathForFile: (file: File): string => webUtils.getPathForFile(file)
+  getPathForFile: (file: File): string => webUtils.getPathForFile(file),
+  onNavigateSettings: (listener: () => void): (() => void) => {
+    const wrapped = (): void => {
+      listener()
+    }
+
+    ipcRenderer.on('app:navigate-settings', wrapped)
+
+    return () => {
+      ipcRenderer.off('app:navigate-settings', wrapped)
+    }
+  },
+  onPiAgentEvent: (listener: (event: PiAgentUiEvent) => void): (() => void) => {
+    const wrapped = (_event: Electron.IpcRendererEvent, payload: PiAgentUiEvent): void => {
+      listener(payload)
+    }
+
+    ipcRenderer.on('pi-agent:event', wrapped)
+
+    return () => {
+      ipcRenderer.off('pi-agent:event', wrapped)
+    }
+  }
 }
 
 window.addEventListener('message', (event) => {

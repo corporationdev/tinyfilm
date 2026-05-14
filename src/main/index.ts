@@ -1,4 +1,5 @@
-import { app, shell, BrowserWindow, ipcMain } from 'electron'
+import { app, shell, BrowserWindow, ipcMain, Menu } from 'electron'
+import type { MenuItemConstructorOptions } from 'electron'
 import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
@@ -11,7 +12,7 @@ function createWindow(): void {
     width: 900,
     height: 670,
     show: false,
-    autoHideMenuBar: true,
+    autoHideMenuBar: false,
     ...(process.platform === 'linux' ? { icon } : {}),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
@@ -37,6 +38,51 @@ function createWindow(): void {
   }
 }
 
+function createApplicationMenu(): void {
+  const fileMenu: MenuItemConstructorOptions = {
+    label: 'File',
+    submenu: [
+      {
+        label: 'Settings',
+        accelerator: 'CommandOrControl+,',
+        click: () => {
+          for (const window of BrowserWindow.getAllWindows()) {
+            window.webContents.send('app:navigate-settings')
+          }
+        }
+      },
+      { type: 'separator' },
+      process.platform === 'darwin' ? { role: 'close' } : { role: 'quit' }
+    ]
+  }
+
+  const template: MenuItemConstructorOptions[] =
+    process.platform === 'darwin'
+      ? [
+          {
+            label: app.name,
+            submenu: [
+              { role: 'about' },
+              { type: 'separator' },
+              { role: 'services' },
+              { type: 'separator' },
+              { role: 'hide' },
+              { role: 'hideOthers' },
+              { role: 'unhide' },
+              { type: 'separator' },
+              { role: 'quit' }
+            ]
+          },
+          fileMenu,
+          { role: 'editMenu' },
+          { role: 'viewMenu' },
+          { role: 'windowMenu' }
+        ]
+      : [fileMenu, { role: 'editMenu' }, { role: 'viewMenu' }]
+
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template))
+}
+
 // This method will be called when Electron has finished
 // initialization and is ready to create browser windows.
 // Some APIs can only be used after this event occurs.
@@ -54,6 +100,7 @@ app.whenReady().then(() => {
   // IPC test
   ipcMain.on('ping', () => console.log('pong'))
   registerRpcServer()
+  createApplicationMenu()
 
   createWindow()
 
