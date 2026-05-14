@@ -25,6 +25,13 @@ interface TranscriptSegment {
   startMs: number
   endMs: number
   text: string
+  words?: TranscriptWord[]
+}
+
+interface TranscriptWord {
+  startMs: number
+  endMs: number
+  text: string
 }
 
 interface SilenceRange {
@@ -53,6 +60,15 @@ interface AssetIndex {
 interface TranscribeResult {
   language?: string
   languageProbability?: number
+  segments: TranscriptSegment[]
+}
+
+export type TranscriptionGranularity = 'segment' | 'word'
+
+export interface TranscriptionResult {
+  language?: string
+  languageProbability?: number
+  granularity: TranscriptionGranularity
   segments: TranscriptSegment[]
 }
 
@@ -191,7 +207,13 @@ export async function detectSilence(filePath: string): Promise<SilenceRange[]> {
   return parseSilenceDetect(stderr)
 }
 
-export async function transcribeFile(filePath: string): Promise<TranscribeResult> {
+export async function transcribeFile(
+  filePath: string,
+  options: {
+    granularity?: TranscriptionGranularity
+    offsetMs?: number
+  } = {}
+): Promise<TranscriptionResult> {
   const pythonPath = resolvePythonExecutable()
   if (!pythonPath) {
     throw new Error(
@@ -201,9 +223,17 @@ export async function transcribeFile(filePath: string): Promise<TranscribeResult
 
   const scriptPath = resolveTranscribeScriptPath()
   const model = process.env['TINYFILM_WHISPER_MODEL'] ?? 'base'
+  const granularity = options.granularity ?? 'segment'
   const { stdout } = await execFileAsync(
     pythonPath,
-    [scriptPath, '--input', filePath, '--model', model],
+    [
+      scriptPath,
+      '--input',
+      filePath,
+      '--model',
+      model,
+      ...(granularity === 'word' ? ['--word-timestamps'] : [])
+    ],
     { maxBuffer: 1024 * 1024 * 100 }
   )
   const parsed = JSON.parse(stdout) as TranscribeResult
@@ -211,7 +241,8 @@ export async function transcribeFile(filePath: string): Promise<TranscribeResult
   return {
     language: parsed.language,
     languageProbability: parsed.languageProbability,
-    segments: normalizeTranscriptSegments(parsed.segments)
+    granularity,
+    segments: normalizeTranscriptSegments(parsed.segments, options.offsetMs ?? 0)
   }
 }
 
@@ -588,7 +619,8 @@ function numberFromString(value: string | undefined): number | null {
 }
 
 function normalizeTranscriptSegments(
-  segments: TranscriptSegment[] | undefined
+  segments: TranscriptSegment[] | undefined,
+  offsetMs: number
 ): TranscriptSegment[] {
   if (!Array.isArray(segments)) {
     return []
@@ -596,11 +628,33 @@ function normalizeTranscriptSegments(
 
   return segments
     .map((segment) => ({
-      startMs: Math.max(0, Math.round(Number(segment.startMs))),
-      endMs: Math.max(0, Math.round(Number(segment.endMs))),
-      text: String(segment.text ?? '').trim()
+      startMs: Math.max(0, Math.round(Number(segment.startMs) + offsetMs)),
+      endMs: Math.max(0, Math.round(Number(segment.endMs) + offsetMs)),
+      text: String(segment.text ?? '').trim(),
+      ...(Array.isArray(segment.words)
+        ? {
+            words: normalizeTranscriptWords(segment.words, offsetMs)
+          }
+        : {})
     }))
     .filter((segment) => segment.text && segment.endMs >= segment.startMs)
+}
+
+function normalizeTranscriptWords(
+  words: TranscriptWord[] | undefined,
+  offsetMs: number
+): TranscriptWord[] {
+  if (!Array.isArray(words)) {
+    return []
+  }
+
+  return words
+    .map((word) => ({
+      startMs: Math.max(0, Math.round(Number(word.startMs) + offsetMs)),
+      endMs: Math.max(0, Math.round(Number(word.endMs) + offsetMs)),
+      text: String(word.text ?? '').trim()
+    }))
+    .filter((word) => word.text && word.endMs >= word.startMs)
 }
 
 function formatTimestamp(timeMs: number): string {

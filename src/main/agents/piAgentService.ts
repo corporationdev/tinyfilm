@@ -10,6 +10,7 @@ import type {
 import { getProject } from '../projects/projectRepository'
 import { emitPiAgentEvent } from './piAgentEvents'
 import { createPiMediaViewExtension } from './piMediaViewExtension'
+import { createPiTranscribeMediaExtension } from './piTranscribeMediaExtension'
 
 interface RuntimeRecord {
   projectId: string
@@ -317,7 +318,7 @@ async function ensureRuntime(input: {
     cwd: input.rootPath,
     agentDir,
     settingsManager,
-    extensionFactories: [createPiMediaViewExtension()]
+    extensionFactories: [createPiMediaViewExtension(), createPiTranscribeMediaExtension()]
   })
   await resourceLoader.reload()
   const forcedModel = getForcedPiModel(modelRegistry)

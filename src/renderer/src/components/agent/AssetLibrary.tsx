@@ -197,8 +197,6 @@ function PreviewImage(props: { filePath: string }): React.JSX.Element {
         })
     }
 
-    setSrc(null)
-    setFailed(false)
     loadImage()
 
     return () => {

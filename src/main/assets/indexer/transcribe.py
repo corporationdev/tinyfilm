@@ -9,6 +9,7 @@ def main():
     parser.add_argument("--input", required=True)
     parser.add_argument("--model", default="base")
     parser.add_argument("--language", default=None)
+    parser.add_argument("--word-timestamps", action="store_true")
     args = parser.parse_args()
 
     try:
@@ -23,22 +24,39 @@ def main():
         args.input,
         language=args.language,
         vad_filter=True,
-        word_timestamps=False,
+        word_timestamps=args.word_timestamps,
     )
 
     result = {
         "language": info.language,
         "languageProbability": info.language_probability,
-        "segments": [
-            {
+        "segments": [],
+    }
+
+    for segment in segments:
+        text = segment.text.strip()
+        if not text:
+            continue
+
+        entry = {
                 "startMs": round(segment.start * 1000),
                 "endMs": round(segment.end * 1000),
-                "text": segment.text.strip(),
-            }
-            for segment in segments
-            if segment.text.strip()
-        ],
-    }
+                "text": text,
+        }
+        words = getattr(segment, "words", None)
+        if args.word_timestamps and words:
+            entry["words"] = [
+                {
+                    "startMs": round(word.start * 1000),
+                    "endMs": round(word.end * 1000),
+                    "text": word.word.strip(),
+                }
+                for word in words
+                if word.word.strip()
+            ]
+
+        result["segments"].append(entry)
+
     print(json.dumps(result, ensure_ascii=False))
 
 
