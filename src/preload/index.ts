@@ -1,8 +1,24 @@
-import { contextBridge } from 'electron'
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
 
 // Custom APIs for renderer
-const api = {}
+const api = {
+  getPathForFile: (file: File): string => webUtils.getPathForFile(file)
+}
+
+window.addEventListener('message', (event) => {
+  if (event.source !== window || event.data !== 'rpc:connect') {
+    return
+  }
+
+  const [serverPort] = event.ports
+
+  if (!serverPort) {
+    return
+  }
+
+  ipcRenderer.postMessage('rpc:connect', null, [serverPort])
+})
 
 // Use `contextBridge` APIs to expose Electron APIs to
 // renderer only if context isolation is enabled, otherwise

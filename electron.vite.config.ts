@@ -1,10 +1,30 @@
-import { resolve } from 'path'
+import { cpSync, existsSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { defineConfig } from 'electron-vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
+import type { Plugin } from 'vite'
+
+function copyMainMigrations(): Plugin {
+  return {
+    name: 'copy-main-migrations',
+    closeBundle() {
+      const source = resolve('src/main/db/migrations')
+      const destination = resolve('out/main/migrations')
+
+      if (!existsSync(source)) {
+        return
+      }
+
+      cpSync(source, destination, { recursive: true })
+    }
+  }
+}
 
 export default defineConfig({
-  main: {},
+  main: {
+    plugins: [copyMainMigrations()]
+  },
   preload: {},
   renderer: {
     resolve: {
