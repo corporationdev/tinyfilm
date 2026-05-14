@@ -1,5 +1,15 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
+  createHashHistory,
+  createRootRoute,
+  createRoute,
+  createRouter,
+  Outlet,
+  RouterProvider,
+  useNavigate,
+  useParams
+} from '@tanstack/react-router'
+import {
   ArrowLeft,
   FileAudio,
   FileImage,
@@ -15,16 +25,65 @@ import type { ProjectAsset } from '../../shared/contracts/app'
 import { Button } from './components/ui/button'
 import { orpc } from './lib/orpc'
 
-type View = { name: 'home' } | { name: 'project'; projectId: string }
+const rootRoute = createRootRoute({
+  component: () => <Outlet />
+})
+
+const indexRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/',
+  component: ProjectHomeRoute
+})
+
+const projectRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/projects/$projectId',
+  component: ProjectDetailRoute
+})
+
+const routeTree = rootRoute.addChildren([indexRoute, projectRoute])
+const router = createRouter({
+  routeTree,
+  history: createHashHistory()
+})
+
+declare module '@tanstack/react-router' {
+  interface Register {
+    router: typeof router
+  }
+}
 
 function App(): React.JSX.Element {
-  const [view, setView] = useState<View>({ name: 'home' })
+  return <RouterProvider router={router} />
+}
 
-  if (view.name === 'project') {
-    return <ProjectDetail projectId={view.projectId} onBack={() => setView({ name: 'home' })} />
-  }
+function ProjectHomeRoute(): React.JSX.Element {
+  const navigate = useNavigate()
 
-  return <ProjectHome onOpenProject={(projectId) => setView({ name: 'project', projectId })} />
+  return (
+    <ProjectHome
+      onOpenProject={(projectId) => {
+        void navigate({
+          to: '/projects/$projectId',
+          params: { projectId }
+        })
+      }}
+    />
+  )
+}
+
+function ProjectDetailRoute(): React.JSX.Element {
+  const navigate = useNavigate()
+  const { projectId } = useParams({ from: '/projects/$projectId' })
+
+  return (
+    <ProjectDetail
+      projectId={projectId}
+      onBack={() => {
+        void navigate({ to: '/' })
+      }}
+    />
+  )
 }
 
 function ProjectHome(props: { onOpenProject: (projectId: string) => void }): React.JSX.Element {
@@ -145,6 +204,29 @@ function ProjectDetail(props: { projectId: string; onBack: () => void }): React.
       input: { id: props.projectId }
     })
   )
+  const previewQuery = useQuery(
+    orpc.projects.startPreview.queryOptions({
+      input: { id: props.projectId },
+      enabled: Boolean(projectQuery.data)
+    })
+  )
+  const previewSrcdocQuery = useQuery({
+    queryKey: ['project-preview-srcdoc', previewQuery.data?.url],
+    queryFn: async () => {
+      if (!previewQuery.data?.url) {
+        throw new Error('Preview URL is missing')
+      }
+
+      const response = await fetch(previewQuery.data.url)
+
+      if (!response.ok) {
+        throw new Error('Preview HTML failed to load')
+      }
+
+      return withBaseElement(await response.text(), previewQuery.data.url)
+    },
+    enabled: Boolean(previewQuery.data?.url)
+  })
   const importFiles = useMutation(
     orpc.assets.importFiles.mutationOptions({
       onSuccess: () => {
@@ -163,7 +245,12 @@ function ProjectDetail(props: { projectId: string; onBack: () => void }): React.
   const project = projectQuery.data
   const assets = assetsQuery.data ?? []
   const activeError =
-    projectQuery.error ?? assetsQuery.error ?? importFiles.error ?? removeAsset.error
+    projectQuery.error ??
+    assetsQuery.error ??
+    previewQuery.error ??
+    previewSrcdocQuery.error ??
+    importFiles.error ??
+    removeAsset.error
 
   const handleDrop = (event: React.DragEvent<HTMLDivElement>): void => {
     event.preventDefault()
@@ -218,7 +305,7 @@ function ProjectDetail(props: { projectId: string; onBack: () => void }): React.
             <div>
               <h2 className="text-sm font-medium">Drop media here</h2>
               <p className="mt-1 text-sm text-zinc-500">
-                Files are copied into this project&apos;s public/assets/imports folder.
+                Files are copied into this project&apos;s assets/imports folder.
               </p>
             </div>
           </div>
@@ -253,16 +340,32 @@ function ProjectDetail(props: { projectId: string; onBack: () => void }): React.
         </aside>
 
         <section className="flex min-h-[420px] flex-col p-5">
-          <div className="flex flex-1 items-center justify-center rounded-md border border-zinc-800 bg-zinc-900">
-            <div className="flex aspect-[9/16] max-h-[70vh] w-full max-w-sm items-center justify-center rounded bg-zinc-950 text-center">
-              <div className="px-8">
-                <FileVideo className="mx-auto mb-4 size-10 text-zinc-700" />
-                <h2 className="text-sm font-medium text-zinc-300">Preview placeholder</h2>
-                <p className="mt-2 text-sm text-zinc-500">
-                  The Remotion preview will mount here after the project model is settled.
-                </p>
+          <div className="flex flex-1 items-center justify-center overflow-hidden rounded-md border border-zinc-800 bg-zinc-900">
+            {previewSrcdocQuery.data && project ? (
+              <hyperframes-player
+                className="block aspect-[9/16] max-h-[76vh] w-full max-w-md overflow-hidden rounded bg-black"
+                autoplay
+                controls
+                height={project.height}
+                muted
+                srcdoc={previewSrcdocQuery.data}
+                width={project.width}
+              />
+            ) : (
+              <div className="flex aspect-[9/16] max-h-[70vh] w-full max-w-sm items-center justify-center rounded bg-zinc-950 text-center">
+                <div className="px-8">
+                  {previewQuery.isPending || previewSrcdocQuery.isPending ? (
+                    <Loader2 className="mx-auto mb-4 size-10 animate-spin text-zinc-700" />
+                  ) : (
+                    <FileVideo className="mx-auto mb-4 size-10 text-zinc-700" />
+                  )}
+                  <h2 className="text-sm font-medium text-zinc-300">Loading preview</h2>
+                  <p className="mt-2 text-sm text-zinc-500">
+                    Tinyfilm is starting a local HyperFrames preview for this project.
+                  </p>
+                </div>
               </div>
-            </div>
+            )}
           </div>
 
           {project ? (
@@ -286,7 +389,7 @@ function EmptyProjects(): React.JSX.Element {
       <FolderPlus className="mb-4 size-10 text-zinc-600" />
       <h2 className="text-lg font-medium">Create your first project</h2>
       <p className="mt-2 max-w-sm text-sm text-zinc-500">
-        Tinyfilm will create a project folder with Remotion source, local assets, and render output.
+        Tinyfilm will create a HyperFrames project folder with local assets and render output.
       </p>
     </div>
   )
@@ -341,6 +444,24 @@ function AssetIcon(props: { type: ProjectAsset['type'] }): React.JSX.Element {
   }
 
   return <FileVideo className="size-4" />
+}
+
+function withBaseElement(html: string, previewUrl: string): string {
+  const base = `<base href="${escapeHtmlAttribute(previewUrl)}" />`
+
+  if (/<base\b/i.test(html)) {
+    return html
+  }
+
+  if (/<head\b[^>]*>/i.test(html)) {
+    return html.replace(/<head\b[^>]*>/i, (match) => `${match}\n    ${base}`)
+  }
+
+  return `${base}\n${html}`
+}
+
+function escapeHtmlAttribute(value: string): string {
+  return value.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;')
 }
 
 export default App

@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "0a05c975-217c-4963-b34e-30b6e7d34762",
+  "id": "9e58ea47-eae1-4d36-8808-65eb75a8aead",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
     "project_assets": {
@@ -156,7 +156,7 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "'src/index.ts'"
+          "default": "'index.html'"
         },
         "composition_id": {
           "name": "composition_id",
@@ -164,7 +164,7 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "'MyComp'"
+          "default": "'main'"
         },
         "thumbnail_path": {
           "name": "thumbnail_path",
@@ -194,7 +194,7 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": 1280
+          "default": 1080
         },
         "height": {
           "name": "height",
@@ -202,7 +202,7 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": 720
+          "default": 1920
         },
         "status": {
           "name": "status",

@@ -11,16 +11,19 @@ import {
   markProjectOpened,
   removeProject
 } from '../projects/projectRepository'
-import { createRemotionProject } from '../remotion/createRemotionProject'
+import { createHyperframesProject } from '../hyperframes/createHyperframesProject'
+import { startProjectPreview, stopProjectPreview } from '../hyperframes/previewServer'
 
 const os = implement(appContract)
 
 export const appRouter = os.router({
   projects: {
     list: os.projects.list.handler(() => listProjects()),
-    create: os.projects.create.handler(({ input }) => createRemotionProject(input)),
+    create: os.projects.create.handler(({ input }) => createHyperframesProject(input)),
     get: os.projects.get.handler(({ input }) => getProject(input)),
     open: os.projects.open.handler(({ input }) => markProjectOpened(input)),
+    startPreview: os.projects.startPreview.handler(({ input }) => startProjectPreview(input)),
+    stopPreview: os.projects.stopPreview.handler(({ input }) => stopProjectPreview(input)),
     remove: os.projects.remove.handler(({ input }) => removeProject(input))
   },
   assets: {

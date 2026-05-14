@@ -20,7 +20,7 @@ export function importProjectFiles(input: {
   filePaths: string[]
 }): ProjectAssetRow[] {
   const project = getProject({ id: input.projectId })
-  const importsDir = join(project.rootPath, 'public', 'assets', 'imports')
+  const importsDir = join(project.rootPath, 'assets', 'imports')
   mkdirSync(importsDir, { recursive: true })
 
   const imported = input.filePaths

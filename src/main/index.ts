@@ -2,6 +2,7 @@ import { app, shell, BrowserWindow, ipcMain } from 'electron'
 import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
+import { stopAllProjectPreviews } from './hyperframes/previewServer'
 import { registerRpcServer } from './rpc/server'
 
 function createWindow(): void {
@@ -70,6 +71,10 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
     app.quit()
   }
+})
+
+app.on('before-quit', () => {
+  void stopAllProjectPreviews()
 })
 
 // In this file you can include the rest of your app's specific main process

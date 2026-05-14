@@ -23,6 +23,7 @@ export function createProjectRecord(input: {
   rootPath: string
   entryPoint?: string
   compositionId?: string
+  durationMs?: number | null
   fps?: number
   width?: number
   height?: number
@@ -33,13 +34,13 @@ export function createProjectRecord(input: {
     title: input.title,
     slug: input.slug,
     rootPath: input.rootPath,
-    entryPoint: input.entryPoint ?? 'src/index.ts',
-    compositionId: input.compositionId ?? 'MyComp',
+    entryPoint: input.entryPoint ?? 'index.html',
+    compositionId: input.compositionId ?? 'main',
     thumbnailPath: null,
-    durationMs: null,
+    durationMs: input.durationMs ?? null,
     fps: input.fps ?? 30,
-    width: input.width ?? 1280,
-    height: input.height ?? 720,
+    width: input.width ?? 1080,
+    height: input.height ?? 1920,
     status: 'draft',
     lastOpenedAt: null,
     createdAt: now,

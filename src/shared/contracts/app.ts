@@ -55,12 +55,20 @@ export const projectAssetIdInputSchema = z.object({
   id: z.uuid()
 })
 
+export const previewSessionSchema = z.object({
+  projectId: z.uuid(),
+  url: z.url(),
+  port: z.number().int().positive()
+})
+
 export const appContract = {
   projects: {
     list: oc.output(z.array(projectSchema)),
     create: oc.input(createProjectInputSchema).output(projectSchema),
     get: oc.input(projectIdInputSchema).output(projectSchema),
     open: oc.input(projectIdInputSchema).output(projectSchema),
+    startPreview: oc.input(projectIdInputSchema).output(previewSessionSchema),
+    stopPreview: oc.input(projectIdInputSchema).output(projectIdInputSchema),
     remove: oc.input(projectIdInputSchema).output(projectIdInputSchema)
   },
   assets: {
@@ -72,4 +80,5 @@ export const appContract = {
 
 export type Project = z.infer<typeof projectSchema>
 export type ProjectAsset = z.infer<typeof projectAssetSchema>
+export type PreviewSession = z.infer<typeof previewSessionSchema>
 export type AppContract = typeof appContract

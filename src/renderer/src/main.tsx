@@ -1,4 +1,5 @@
 import './assets/main.css'
+import '@hyperframes/player'
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { StrictMode } from 'react'
