@@ -1,5 +1,5 @@
 import { createReadStream, existsSync, statSync } from 'node:fs'
-import { createServer, type Server } from 'node:http'
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { extname, join, normalize, relative, resolve, sep } from 'node:path'
 import { getProject } from '../projects/projectRepository'
 
@@ -32,7 +32,8 @@ export async function startProjectPreview(input: { id: string }): Promise<Previe
   const server = createServer((request, response) => {
     response.setHeader('Access-Control-Allow-Origin', '*')
     response.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS')
-    response.setHeader('Access-Control-Allow-Headers', 'Content-Type')
+    response.setHeader('Access-Control-Allow-Headers', 'Content-Type, Range')
+    response.setHeader('Access-Control-Expose-Headers', 'Accept-Ranges, Content-Length, Content-Range')
 
     if (request.method === 'OPTIONS') {
       response.writeHead(204)
@@ -63,17 +64,7 @@ export async function startProjectPreview(input: { id: string }): Promise<Previe
       return
     }
 
-    response.writeHead(200, {
-      'Content-Length': statSync(resolvedFilePath).size,
-      'Content-Type': contentTypeForPath(resolvedFilePath)
-    })
-
-    if (request.method === 'HEAD') {
-      response.end()
-      return
-    }
-
-    createReadStream(resolvedFilePath).pipe(response)
+    serveFile(request, response, resolvedFilePath)
   })
 
   const port = await listen(server)
@@ -158,6 +149,104 @@ function toPublicSession(session: ServerSession): PreviewSession {
     projectId: session.projectId,
     url: session.url,
     port: session.port
+  }
+}
+
+function serveFile(request: IncomingMessage, response: ServerResponse, filePath: string): void {
+  const stats = statSync(filePath)
+  const range = parseRangeHeader(request.headers.range, stats.size)
+  const contentType = contentTypeForPath(filePath)
+
+  if (range === 'invalid') {
+    response.writeHead(416, {
+      'Accept-Ranges': 'bytes',
+      'Content-Range': `bytes */${stats.size}`,
+      'Content-Type': contentType
+    })
+    response.end()
+    return
+  }
+
+  if (range) {
+    response.writeHead(206, {
+      'Accept-Ranges': 'bytes',
+      'Content-Length': range.end - range.start + 1,
+      'Content-Range': `bytes ${range.start}-${range.end}/${stats.size}`,
+      'Content-Type': contentType
+    })
+
+    if (request.method === 'HEAD') {
+      response.end()
+      return
+    }
+
+    createReadStream(filePath, { start: range.start, end: range.end }).pipe(response)
+    return
+  }
+
+  response.writeHead(200, {
+    'Accept-Ranges': 'bytes',
+    'Content-Length': stats.size,
+    'Content-Type': contentType
+  })
+
+  if (request.method === 'HEAD') {
+    response.end()
+    return
+  }
+
+  createReadStream(filePath).pipe(response)
+}
+
+function parseRangeHeader(
+  rangeHeader: string | undefined,
+  size: number
+): { start: number; end: number } | 'invalid' | null {
+  if (!rangeHeader) {
+    return null
+  }
+
+  const match = rangeHeader.match(/^bytes=(\d*)-(\d*)$/)
+
+  if (!match) {
+    return 'invalid'
+  }
+
+  const [, rawStart, rawEnd] = match
+
+  if (!rawStart && !rawEnd) {
+    return 'invalid'
+  }
+
+  if (!rawStart) {
+    const suffixLength = Number(rawEnd)
+
+    if (!Number.isInteger(suffixLength) || suffixLength <= 0) {
+      return 'invalid'
+    }
+
+    return {
+      start: Math.max(size - suffixLength, 0),
+      end: size - 1
+    }
+  }
+
+  const start = Number(rawStart)
+  const end = rawEnd ? Number(rawEnd) : size - 1
+
+  if (
+    !Number.isInteger(start) ||
+    !Number.isInteger(end) ||
+    start < 0 ||
+    end < start ||
+    start >= size
+  ) {
+    return 'invalid'
+  }
+
+  return {
+    start,
+    end: Math.min(end, size - 1)
   }
 }
 

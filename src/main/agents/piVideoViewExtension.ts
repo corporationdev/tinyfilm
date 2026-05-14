@@ -1,5 +1,8 @@
-import { access, stat } from 'node:fs/promises'
-import { basename, extname, isAbsolute, resolve } from 'node:path'
+import { execFile } from 'node:child_process'
+import { access, mkdtemp, rm, stat } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { basename, extname, isAbsolute, join, resolve } from 'node:path'
+import { promisify } from 'node:util'
 import { FileState, GoogleGenAI, type File as GeminiFile } from '@google/genai'
 import type { ExtensionFactory } from '@earendil-works/pi-coding-agent'
 
@@ -7,6 +10,8 @@ interface PendingVideo {
   path: string
   mimeType: string
   displayName: string
+  source: string
+  cleanupDir?: string
   startSeconds?: number
   endSeconds?: number
   fps?: number
@@ -40,22 +45,26 @@ const supportedVideoMimeTypes = new Map<string, string>([
   ['.3gpp', 'video/3gpp']
 ])
 
+const previewSource = 'preview'
+const execFileAsync = promisify(execFile)
+
 const videoParameterSchema = {
   type: 'object',
   additionalProperties: false,
-  required: ['path'],
+  required: ['source'],
   properties: {
-    path: {
+    source: {
       type: 'string',
-      description: 'Path to a local video file, relative to the project root or absolute.'
+      description:
+        'Video source to inspect. Use "preview" for the active Tinyfilm preview, or provide any local video file path on this machine, relative to the project root or absolute.'
     },
     startSeconds: {
       type: 'number',
-      description: 'Optional start offset in seconds for Gemini video clipping.'
+      description: 'Optional start offset in seconds for the video segment to inspect.'
     },
     endSeconds: {
       type: 'number',
-      description: 'Optional end offset in seconds for Gemini video clipping.'
+      description: 'Optional end offset in seconds for the video segment to inspect.'
     },
     fps: {
       type: 'number',
@@ -65,7 +74,7 @@ const videoParameterSchema = {
 } as const
 
 interface ViewVideoParams {
-  path: string
+  source: string
   startSeconds?: number
   endSeconds?: number
   fps?: number
@@ -79,24 +88,31 @@ export function createPiVideoViewExtension(): ExtensionFactory {
       name: 'view_video',
       label: 'View video',
       description:
-        'View a local video file natively with Gemini on the next reasoning turn. Use this when visual or audio details from footage are needed.',
-      promptSnippet: 'view_video: View a local video file natively with Gemini.',
+        'View video natively with Gemini on the next reasoning turn. Use source "preview" to render and inspect the active Tinyfilm preview with audio, or use a local path to inspect any video file on this machine.',
+      promptSnippet:
+        'view_video: View video natively with Gemini. Set source to "preview" for the active Tinyfilm preview, or to a local video file path.',
       promptGuidelines: [
-        'Use view_video when you need to inspect footage directly; the video will be available on the next model turn.'
+        'Use view_video when you need to inspect footage directly; the video will be available on the next model turn.',
+        'Use source "preview" when the user asks about the current or active preview. Use a local file path as source when the user asks about a specific video file.'
       ],
       parameters: videoParameterSchema,
       executionMode: 'sequential',
       async execute(_toolCallId, params: ViewVideoParams, _signal, _onUpdate, ctx) {
-        const filePath = await resolveVideoPath(ctx.cwd, params.path)
-        const mimeType = mimeTypeForVideoPath(filePath)
         validateVideoOptions(params)
+        const resolvedVideo = await resolveVideoSource(ctx.cwd, params)
 
         const pendingVideo: PendingVideo = {
-          path: filePath,
-          mimeType,
-          displayName: basename(filePath),
-          ...(params.startSeconds !== undefined ? { startSeconds: params.startSeconds } : {}),
-          ...(params.endSeconds !== undefined ? { endSeconds: params.endSeconds } : {}),
+          path: resolvedVideo.path,
+          mimeType: resolvedVideo.mimeType,
+          displayName: resolvedVideo.displayName,
+          source: params.source,
+          ...(resolvedVideo.cleanupDir ? { cleanupDir: resolvedVideo.cleanupDir } : {}),
+          ...(resolvedVideo.useGeminiMetadata && params.startSeconds !== undefined
+            ? { startSeconds: params.startSeconds }
+            : {}),
+          ...(resolvedVideo.useGeminiMetadata && params.endSeconds !== undefined
+            ? { endSeconds: params.endSeconds }
+            : {}),
           ...(params.fps !== undefined ? { fps: params.fps } : {})
         }
 
@@ -114,6 +130,7 @@ export function createPiVideoViewExtension(): ExtensionFactory {
             }
           ],
           details: {
+            source: pendingVideo.source,
             path: pendingVideo.path,
             mimeType: pendingVideo.mimeType,
             startSeconds: pendingVideo.startSeconds,
@@ -163,11 +180,14 @@ export function createPiVideoViewExtension(): ExtensionFactory {
           sessionId,
           error
         })
+        pendingBySessionId.delete(sessionId)
+        await cleanupResolvedVideos(pendingVideos)
         throw error
       }
 
       appendVideoUserTurnAfterToolResult(payload, uploadedParts)
       pendingBySessionId.delete(sessionId)
+      await cleanupResolvedVideos(pendingVideos)
       return payload
     })
 
@@ -176,6 +196,36 @@ export function createPiVideoViewExtension(): ExtensionFactory {
         pendingBySessionId.delete(ctx.sessionManager.getSessionId())
       }
     })
+  }
+}
+
+type ResolvedVideoSource = {
+  path: string
+  mimeType: string
+  displayName: string
+  cleanupDir?: string
+  useGeminiMetadata: boolean
+}
+
+async function resolveVideoSource(
+  cwd: string,
+  params: ViewVideoParams
+): Promise<ResolvedVideoSource> {
+  const source = params.source.trim()
+  if (!source) {
+    throw new Error('Video source is required')
+  }
+
+  if (source === previewSource) {
+    return renderPreviewVideo(cwd, params)
+  }
+
+  const filePath = await resolveVideoPath(cwd, source)
+  return {
+    path: filePath,
+    mimeType: mimeTypeForVideoPath(filePath),
+    displayName: basename(filePath),
+    useGeminiMetadata: true
   }
 }
 
@@ -195,6 +245,115 @@ async function resolveVideoPath(cwd: string, inputPath: string): Promise<string>
 
   mimeTypeForVideoPath(filePath)
   return filePath
+}
+
+async function renderPreviewVideo(
+  cwd: string,
+  params: ViewVideoParams
+): Promise<ResolvedVideoSource> {
+  const tempDir = await mkdtemp(join(tmpdir(), 'tinyfilm-preview-video-'))
+  const fullRenderPath = join(tempDir, 'preview-full.mp4')
+  const clipPath = join(tempDir, 'preview-clip.mp4')
+
+  try {
+    await execFileAsync(
+      'npx',
+      [
+        '--yes',
+        'hyperframes',
+        'render',
+        '--quiet',
+        '--format',
+        'mp4',
+        '--output',
+        fullRenderPath,
+        cwd
+      ],
+      {
+        cwd,
+        env: process.env,
+        maxBuffer: 1024 * 1024 * 20
+      }
+    )
+
+    const hasClipRange = params.startSeconds !== undefined || params.endSeconds !== undefined
+    if (!hasClipRange) {
+      return {
+        path: fullRenderPath,
+        mimeType: 'video/mp4',
+        displayName: 'preview.mp4',
+        cleanupDir: tempDir,
+        useGeminiMetadata: false
+      }
+    }
+
+    await clipVideo(fullRenderPath, clipPath, params)
+    return {
+      path: clipPath,
+      mimeType: 'video/mp4',
+      displayName: displayNameForPreviewClip(params),
+      cleanupDir: tempDir,
+      useGeminiMetadata: false
+    }
+  } catch (error) {
+    await rm(tempDir, { recursive: true, force: true })
+    throw error
+  }
+}
+
+async function clipVideo(
+  inputPath: string,
+  outputPath: string,
+  params: Pick<ViewVideoParams, 'startSeconds' | 'endSeconds'>
+): Promise<void> {
+  const args = ['-y']
+
+  if (params.startSeconds !== undefined) {
+    args.push('-ss', String(params.startSeconds))
+  }
+
+  args.push('-i', inputPath)
+
+  if (params.startSeconds !== undefined && params.endSeconds !== undefined) {
+    args.push('-t', String(params.endSeconds - params.startSeconds))
+  } else if (params.endSeconds !== undefined) {
+    args.push('-to', String(params.endSeconds))
+  }
+
+  args.push('-map', '0', '-c', 'copy', '-avoid_negative_ts', 'make_zero', outputPath)
+  await execFileAsync('ffmpeg', args, {
+    env: process.env,
+    maxBuffer: 1024 * 1024 * 20
+  })
+}
+
+function displayNameForPreviewClip(
+  params: Pick<ViewVideoParams, 'startSeconds' | 'endSeconds'>
+): string {
+  const start = params.startSeconds ?? 0
+  const end = params.endSeconds
+
+  if (end === undefined) {
+    return `preview-from-${formatSecondsForName(start)}s.mp4`
+  }
+
+  return `preview-${formatSecondsForName(start)}s-${formatSecondsForName(end)}s.mp4`
+}
+
+function formatSecondsForName(seconds: number): string {
+  return String(seconds).replace(/\./g, '_')
+}
+
+async function cleanupResolvedVideos(videos: PendingVideo[]): Promise<void> {
+  await Promise.allSettled(
+    Array.from(new Set(videos.map((video) => video.cleanupDir).filter(isString))).map((dir) => {
+      return rm(dir, { recursive: true, force: true })
+    })
+  )
+}
+
+function isString(value: string | undefined): value is string {
+  return typeof value === 'string'
 }
 
 function mimeTypeForVideoPath(filePath: string): string {
