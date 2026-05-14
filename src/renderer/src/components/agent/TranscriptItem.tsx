@@ -2,7 +2,7 @@ import { AlertCircle, CheckCircle2, ChevronRight, Loader2, Terminal } from 'luci
 import type { PiAgentTranscriptItem } from '../../../../shared/contracts/app'
 import { FormattedText } from './FormattedText'
 import { isThinkingActivity } from './transcriptUtils'
-import { displayToolLabel, toolDetailsText } from './toolUtils'
+import { displayToolLabel, toolDetailSections } from './toolUtils'
 
 export function TranscriptItem(props: {
   item: PiAgentTranscriptItem
@@ -61,6 +61,7 @@ function ToolRow(props: {
   expanded: boolean
   onToggle: () => void
 }): React.JSX.Element {
+  const detailSections = toolDetailSections(props.item)
   const statusIcon =
     props.item.status === 'running' ? (
       <Loader2 className="size-3.5 animate-spin" />
@@ -69,10 +70,7 @@ function ToolRow(props: {
     ) : (
       <CheckCircle2 className="size-3.5" />
     )
-  const hasDetails =
-    Boolean(props.item.text?.trim()) ||
-    props.item.input !== undefined ||
-    props.item.output !== undefined
+  const hasDetails = detailSections.length > 0
 
   return (
     <article
@@ -112,10 +110,25 @@ function ToolRow(props: {
       </button>
 
       {props.expanded && hasDetails ? (
-        <div className="border-t border-zinc-800 p-3">
-          <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-sm bg-black/45 p-3 font-mono text-[11px] leading-5 text-zinc-400">
-            {toolDetailsText(props.item)}
-          </pre>
+        <div className="grid gap-2 border-t border-zinc-800 bg-black/15 p-3">
+          {detailSections.map((section) => (
+            <section
+              className="overflow-hidden rounded-md border border-zinc-800/80 bg-zinc-950/80"
+              key={section.label}
+            >
+              <div className="flex items-center justify-between border-b border-zinc-800/80 px-3 py-1.5">
+                <span className="text-[10px] font-semibold uppercase tracking-[0.14em] text-zinc-500">
+                  {section.label}
+                </span>
+                <span className="font-mono text-[10px] text-zinc-600">
+                  {section.value.split('\n').length} lines
+                </span>
+              </div>
+              <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words px-3 py-2.5 font-mono text-[11px] leading-5 text-zinc-300">
+                {section.value}
+              </pre>
+            </section>
+          ))}
         </div>
       ) : null}
     </article>

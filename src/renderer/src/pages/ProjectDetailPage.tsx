@@ -1,5 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { ArrowLeft, FileVideo, Loader2 } from 'lucide-react'
+import { useEffect, useState } from 'react'
 import { AgentPanel } from '../components/agent/AgentPanel'
 import { ErrorBanner } from '../components/common/ErrorBanner'
 import { Button } from '../components/ui/button'
@@ -13,6 +14,10 @@ export function ProjectDetailPage(props: {
   onSelectChat: (sessionId: string | undefined) => void
   onOpenSettings: () => void
 }): React.JSX.Element {
+  const [previewState, setPreviewState] = useState(() => ({
+    projectId: props.projectId,
+    version: 0
+  }))
   const projectQuery = useQuery(
     orpc.projects.get.queryOptions({
       input: { id: props.projectId }
@@ -24,14 +29,19 @@ export function ProjectDetailPage(props: {
       enabled: Boolean(projectQuery.data)
     })
   )
+
+  const project = projectQuery.data
+  const previewVersion = previewState.projectId === props.projectId ? previewState.version : 0
   const previewSrcdocQuery = useQuery({
-    queryKey: ['project-preview-srcdoc', previewQuery.data?.url],
+    queryKey: ['project-preview-srcdoc', previewQuery.data?.url, previewVersion],
     queryFn: async () => {
       if (!previewQuery.data?.url) {
         throw new Error('Preview URL is missing')
       }
 
-      const response = await fetch(previewQuery.data.url)
+      const response = await fetch(withPreviewVersion(previewQuery.data.url, previewVersion), {
+        cache: 'no-store'
+      })
 
       if (!response.ok) {
         throw new Error('Preview HTML failed to load')
@@ -41,9 +51,20 @@ export function ProjectDetailPage(props: {
     },
     enabled: Boolean(previewQuery.data?.url)
   })
+  const activeError = projectQuery.error ?? previewQuery.error
 
-  const project = projectQuery.data
-  const activeError = projectQuery.error ?? previewQuery.error ?? previewSrcdocQuery.error
+  useEffect(() => {
+    return window.api.onPreviewChanged((event) => {
+      if (event.projectId !== props.projectId) {
+        return
+      }
+
+      setPreviewState({
+        projectId: event.projectId,
+        version: event.version
+      })
+    })
+  }, [props.projectId])
 
   return (
     <main className="flex h-svh flex-col overflow-hidden bg-zinc-950 text-zinc-100">
@@ -72,7 +93,10 @@ export function ProjectDetailPage(props: {
                 selectedSessionId={props.selectedSessionId}
                 onSelectChat={props.onSelectChat}
                 onRunCompleted={() => {
-                  void previewSrcdocQuery.refetch()
+                  setPreviewState((state) => ({
+                    projectId: props.projectId,
+                    version: (state.projectId === props.projectId ? state.version : 0) + 1
+                  }))
                 }}
                 onOpenSettings={props.onOpenSettings}
               />
@@ -89,6 +113,7 @@ export function ProjectDetailPage(props: {
                     className="block aspect-[9/16] max-h-[76vh] w-full max-w-md overflow-hidden rounded bg-black"
                     controls
                     height={project.height}
+                    key={`${project.id}:${previewVersion}`}
                     muted
                     srcdoc={previewSrcdocQuery.data}
                     width={project.width}
@@ -115,6 +140,12 @@ export function ProjectDetailPage(props: {
       </section>
     </main>
   )
+}
+
+function withPreviewVersion(previewUrl: string, version: number): string {
+  const url = new URL(previewUrl)
+  url.searchParams.set('tinyfilmPreviewVersion', String(version))
+  return url.toString()
 }
 
 function withBaseElement(html: string, previewUrl: string): string {

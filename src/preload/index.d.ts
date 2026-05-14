@@ -1,5 +1,6 @@
 import { ElectronAPI } from '@electron-toolkit/preload'
 import type { PiAgentUiEvent } from '../main/agents/piAgentEvents'
+import type { PreviewChangedEvent } from '../shared/contracts/app'
 
 declare global {
   interface Window {
@@ -9,6 +10,7 @@ declare global {
       fileDataUrl: (filePath: string) => Promise<string>
       onNavigateSettings: (listener: () => void) => () => void
       onPiAgentEvent: (listener: (event: PiAgentUiEvent) => void) => () => void
+      onPreviewChanged: (listener: (event: PreviewChangedEvent) => void) => () => void
     }
   }
 }

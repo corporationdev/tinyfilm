@@ -1,6 +1,8 @@
-import { createReadStream, existsSync, statSync } from 'node:fs'
+import { createReadStream, existsSync, statSync, watch, type FSWatcher } from 'node:fs'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { extname, join, normalize, relative, resolve, sep } from 'node:path'
+import { BrowserWindow } from 'electron'
+import type { PreviewChangedEvent } from '../../shared/contracts/app'
 import { getProject } from '../projects/projectRepository'
 
 type PreviewSession = {
@@ -11,9 +13,14 @@ type PreviewSession = {
 
 type ServerSession = PreviewSession & {
   server: Server
+  watcher: FSWatcher | null
+  watchTimer: NodeJS.Timeout | null
+  version: number
 }
 
 const previewServers = new Map<string, ServerSession>()
+const ignoredWatchSegments = new Set(['.git', 'node_modules', 'renders'])
+const previewChangeDebounceMs = 120
 
 export async function startProjectPreview(input: { id: string }): Promise<PreviewSession> {
   const existing = previewServers.get(input.id)
@@ -33,7 +40,13 @@ export async function startProjectPreview(input: { id: string }): Promise<Previe
     response.setHeader('Access-Control-Allow-Origin', '*')
     response.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS')
     response.setHeader('Access-Control-Allow-Headers', 'Content-Type, Range')
-    response.setHeader('Access-Control-Expose-Headers', 'Accept-Ranges, Content-Length, Content-Range')
+    response.setHeader(
+      'Access-Control-Expose-Headers',
+      'Accept-Ranges, Content-Length, Content-Range'
+    )
+    response.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate')
+    response.setHeader('Pragma', 'no-cache')
+    response.setHeader('Expires', '0')
 
     if (request.method === 'OPTIONS') {
       response.writeHead(204)
@@ -72,8 +85,12 @@ export async function startProjectPreview(input: { id: string }): Promise<Previe
     projectId: project.id,
     url: `http://127.0.0.1:${port}/${project.entryPoint}`,
     port,
-    server
+    server,
+    watcher: null,
+    watchTimer: null,
+    version: 0
   }
+  session.watcher = watchProjectRoot(rootPath, session)
 
   previewServers.set(project.id, session)
   return toPublicSession(session)
@@ -87,6 +104,10 @@ export async function stopProjectPreview(input: { id: string }): Promise<{ id: s
   }
 
   previewServers.delete(input.id)
+  session.watcher?.close()
+  if (session.watchTimer) {
+    clearTimeout(session.watchTimer)
+  }
   await close(session.server)
 
   return input
@@ -149,6 +170,49 @@ function toPublicSession(session: ServerSession): PreviewSession {
     projectId: session.projectId,
     url: session.url,
     port: session.port
+  }
+}
+
+function watchProjectRoot(rootPath: string, session: ServerSession): FSWatcher | null {
+  try {
+    return watch(rootPath, { recursive: true }, (_eventType, filename) => {
+      const changedPath = filename ? String(filename) : null
+
+      if (changedPath && shouldIgnorePreviewChange(changedPath)) {
+        return
+      }
+
+      if (session.watchTimer) {
+        clearTimeout(session.watchTimer)
+      }
+
+      session.watchTimer = setTimeout(() => {
+        session.watchTimer = null
+        session.version += 1
+        publishPreviewChanged({
+          projectId: session.projectId,
+          version: session.version,
+          changedPath
+        })
+      }, previewChangeDebounceMs)
+    })
+  } catch (error) {
+    console.warn('[tinyfilm-preview] Unable to watch project root for preview reloads', {
+      projectId: session.projectId,
+      rootPath,
+      error
+    })
+    return null
+  }
+}
+
+function shouldIgnorePreviewChange(changedPath: string): boolean {
+  return changedPath.split(/[\\/]+/).some((segment) => ignoredWatchSegments.has(segment))
+}
+
+function publishPreviewChanged(event: PreviewChangedEvent): void {
+  for (const window of BrowserWindow.getAllWindows()) {
+    window.webContents.send('preview:changed', event)
   }
 }
 

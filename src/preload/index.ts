@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
 import type { PiAgentUiEvent } from '../main/agents/piAgentEvents'
+import type { PreviewChangedEvent } from '../shared/contracts/app'
 
 // Custom APIs for renderer
 const api = {
@@ -27,6 +28,17 @@ const api = {
 
     return () => {
       ipcRenderer.off('pi-agent:event', wrapped)
+    }
+  },
+  onPreviewChanged: (listener: (event: PreviewChangedEvent) => void): (() => void) => {
+    const wrapped = (_event: Electron.IpcRendererEvent, payload: PreviewChangedEvent): void => {
+      listener(payload)
+    }
+
+    ipcRenderer.on('preview:changed', wrapped)
+
+    return () => {
+      ipcRenderer.off('preview:changed', wrapped)
     }
   }
 }

@@ -182,6 +182,11 @@ export const appContract = {
 export type Project = z.infer<typeof projectSchema>
 export type ProjectAsset = z.infer<typeof projectAssetSchema>
 export type PreviewSession = z.infer<typeof previewSessionSchema>
+export type PreviewChangedEvent = {
+  projectId: string
+  version: number
+  changedPath: string | null
+}
 export type PiAgentChat = z.infer<typeof piAgentChatSchema>
 export type PiAgentTranscriptItem = z.infer<typeof piAgentTranscriptItemSchema>
 export type PiAgentAuthStatus = z.infer<typeof piAgentAuthStatusSchema>

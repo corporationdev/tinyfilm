@@ -1,31 +1,33 @@
 import type { PiAgentTranscriptItem } from '../../../../shared/contracts/app'
 
-export function toolDetailsText(item: Extract<PiAgentTranscriptItem, { kind: 'tool' }>): string {
-  if (
-    item.toolName === 'bash' &&
-    item.input &&
-    typeof item.input === 'object' &&
-    typeof (item.input as Record<string, unknown>).command === 'string' &&
-    typeof item.output === 'string'
-  ) {
-    return `$ ${(item.input as Record<string, unknown>).command}\n${item.output}`.trim()
+type ToolTranscriptItem = Extract<PiAgentTranscriptItem, { kind: 'tool' }>
+
+export type ToolDetailSection = {
+  label: 'Input' | 'Output' | 'Details'
+  value: string
+}
+
+export function toolDetailSections(item: ToolTranscriptItem): ToolDetailSection[] {
+  const sections: ToolDetailSection[] = []
+  const input = item.input === undefined ? undefined : formatToolValue(item.input)
+  const output = item.output === undefined ? undefined : formatToolValue(item.output)
+  const text = item.text?.trim()
+
+  if (input) {
+    sections.push({ label: 'Input', value: input })
   }
 
-  const parts: string[] = []
-
-  if (item.text?.trim()) {
-    parts.push(item.text.trim())
+  if (output) {
+    sections.push({ label: 'Output', value: output })
+  } else if (text) {
+    sections.push({ label: 'Output', value: text })
   }
 
-  if (item.input !== undefined) {
-    parts.push(`Input\n${formatToolValue(item.input)}`)
+  if (text && text !== output && item.output !== undefined) {
+    sections.push({ label: 'Details', value: text })
   }
 
-  if (item.output !== undefined && formatToolValue(item.output) !== item.text?.trim()) {
-    parts.push(`Output\n${formatToolValue(item.output)}`)
-  }
-
-  return parts.join('\n\n')
+  return sections
 }
 
 function formatToolValue(value: unknown): string {
