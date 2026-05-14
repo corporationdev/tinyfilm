@@ -168,22 +168,44 @@ function PreviewImage(props: { filePath: string }): React.JSX.Element {
 
   useEffect(() => {
     let cancelled = false
+    let timeout: number | undefined
+    let attempts = 0
+    const maxAttempts = 24
 
-    window.api
-      .fileDataUrl(props.filePath)
-      .then((dataUrl) => {
-        if (!cancelled) {
-          setSrc(dataUrl)
-        }
-      })
-      .catch(() => {
-        if (!cancelled) {
+    const loadImage = (): void => {
+      attempts += 1
+
+      window.api
+        .fileDataUrl(props.filePath)
+        .then((dataUrl) => {
+          if (!cancelled) {
+            setFailed(false)
+            setSrc(dataUrl)
+          }
+        })
+        .catch(() => {
+          if (cancelled) {
+            return
+          }
+
+          if (attempts < maxAttempts) {
+            timeout = window.setTimeout(loadImage, 500)
+            return
+          }
+
           setFailed(true)
-        }
-      })
+        })
+    }
+
+    setSrc(null)
+    setFailed(false)
+    loadImage()
 
     return () => {
       cancelled = true
+      if (timeout) {
+        window.clearTimeout(timeout)
+      }
     }
   }, [props.filePath])
 

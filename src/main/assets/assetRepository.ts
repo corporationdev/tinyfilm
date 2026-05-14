@@ -1,11 +1,11 @@
 import { randomUUID } from 'node:crypto'
-import { execFileSync } from 'node:child_process'
-import { accessSync, copyFileSync, existsSync, mkdirSync, rmSync, statSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, rmSync, statSync } from 'node:fs'
 import { basename, dirname, extname, join, relative } from 'node:path'
 import { asc, eq } from 'drizzle-orm'
 import { getDatabase } from '../db/client'
 import { type ProjectAssetRow, projectAssets } from '../db/schema'
 import { getProject } from '../projects/projectRepository'
+import { createVideoThumbnail, startAssetIndexing } from './assetIndexer'
 
 export function listProjectAssets(input: { projectId: string }): ProjectAssetRow[] {
   return getDatabase()
@@ -20,48 +20,58 @@ export function importProjectFiles(input: {
   projectId: string
   filePaths: string[]
 }): ProjectAssetRow[] {
+  return input.filePaths
+    .filter((filePath) => filePath.trim().length > 0 && existsSync(filePath))
+    .map((filePath) =>
+      registerProjectAssetFromPath({ projectId: input.projectId, sourcePath: filePath })
+    )
+}
+
+export function registerProjectAssetFromPath(input: {
+  projectId: string
+  sourcePath: string
+  displayName?: string
+}): ProjectAssetRow {
   const project = getProject({ id: input.projectId })
   const assetsDir = join(project.rootPath, 'assets')
   mkdirSync(assetsDir, { recursive: true })
 
-  const assets = input.filePaths
-    .filter((filePath) => filePath.trim().length > 0 && existsSync(filePath))
-    .map((filePath) => {
-      const now = Date.now()
-      const id = randomUUID()
-      const name = basename(filePath)
-      const assetDir = join(assetsDir, id)
-      const extension = extname(filePath).toLowerCase()
-      const assetPath = join(assetDir, `original${extension}`)
-      const stats = statSync(filePath)
+  const sourcePath = input.sourcePath.trim()
+  const now = Date.now()
+  const id = randomUUID()
+  const name = input.displayName?.trim() || basename(sourcePath)
+  const assetDir = join(assetsDir, id)
+  const extension = extname(sourcePath).toLowerCase()
+  const assetPath = join(assetDir, `original${extension}`)
+  const stats = statSync(sourcePath)
 
-      mkdirSync(assetDir, { recursive: true })
-      copyFileSync(filePath, assetPath)
+  mkdirSync(assetDir, { recursive: true })
+  copyFileSync(sourcePath, assetPath)
 
-      const asset: ProjectAssetRow = {
-        id,
-        projectId: project.id,
-        type: inferAssetType(filePath),
-        name,
-        originalPath: filePath,
-        assetPath,
-        relativePath: relative(project.rootPath, assetPath),
-        sizeBytes: stats.size,
-        mimeType: null,
-        durationMs: null,
-        width: null,
-        height: null,
-        createdAt: now
-      }
+  const asset: ProjectAssetRow = {
+    id,
+    projectId: project.id,
+    type: inferAssetType(sourcePath),
+    name,
+    originalPath: sourcePath,
+    assetPath,
+    relativePath: relative(project.rootPath, assetPath),
+    sizeBytes: stats.size,
+    mimeType: null,
+    durationMs: null,
+    width: null,
+    height: null,
+    indexStatus: null,
+    indexUpdatedAt: null,
+    indexError: null,
+    createdAt: now
+  }
 
-      createAssetThumbnail(asset)
-      getDatabase().insert(projectAssets).values(asset).run()
-      startAssetIndexing(asset)
+  getDatabase().insert(projectAssets).values(asset).run()
+  createAssetThumbnail(asset)
+  startAssetIndexing(asset)
 
-      return asset
-    })
-
-  return assets
+  return asset
 }
 
 export function removeProjectAsset(input: { id: string }): { id: string } {
@@ -126,69 +136,18 @@ function inferAssetType(filePath: string): ProjectAssetRow['type'] {
   return 'other'
 }
 
-function startAssetIndexing(asset: ProjectAssetRow): void {
-  console.info('starting indexing', {
-    id: asset.id,
-    name: asset.name,
-    path: asset.assetPath
-  })
-}
-
 function createAssetThumbnail(asset: ProjectAssetRow): void {
   if (asset.type !== 'video') {
     return
   }
 
-  try {
-    const ffmpegPath = resolveFfmpegPath()
-
-    if (!ffmpegPath) {
-      throw new Error('ffmpeg executable was not found')
-    }
-
-    execFileSync(
-      ffmpegPath,
-      [
-        '-y',
-        '-ss',
-        '0.1',
-        '-i',
-        asset.assetPath,
-        '-frames:v',
-        '1',
-        '-vf',
-        'scale=480:-1',
-        join(dirname(asset.assetPath), 'thumbnail.jpg')
-      ],
-      { stdio: 'ignore' }
-    )
-  } catch (error) {
+  void createVideoThumbnail(asset).catch((error) => {
     console.warn('[assets:thumbnailFailed]', {
       id: asset.id,
       path: asset.assetPath,
       error: error instanceof Error ? error.message : error
     })
-  }
-}
-
-function resolveFfmpegPath(): string | null {
-  const candidates = [
-    'ffmpeg',
-    '/opt/homebrew/bin/ffmpeg',
-    '/usr/local/bin/ffmpeg',
-    '/usr/bin/ffmpeg'
-  ]
-
-  for (const candidate of candidates) {
-    try {
-      accessSync(candidate)
-      return candidate
-    } catch {
-      // Try the next common install location.
-    }
-  }
-
-  return null
+  })
 }
 
 function removeAssetFiles(asset: ProjectAssetRow): void {

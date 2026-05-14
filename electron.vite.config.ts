@@ -7,16 +7,23 @@ import type { Plugin } from 'vite'
 
 function copyMainMigrations(): Plugin {
   return {
-    name: 'copy-main-migrations',
+    name: 'copy-main-assets',
     closeBundle() {
-      const source = resolve('src/main/db/migrations')
-      const destination = resolve('out/main/migrations')
+      const copies = [
+        ['src/main/db/migrations', 'out/main/migrations'],
+        ['src/main/assets/indexer', 'out/main/assets/indexer']
+      ] as const
 
-      if (!existsSync(source)) {
-        return
+      for (const [sourcePath, destinationPath] of copies) {
+        const source = resolve(sourcePath)
+        const destination = resolve(destinationPath)
+
+        if (!existsSync(source)) {
+          continue
+        }
+
+        cpSync(source, destination, { recursive: true })
       }
-
-      cpSync(source, destination, { recursive: true })
     }
   }
 }

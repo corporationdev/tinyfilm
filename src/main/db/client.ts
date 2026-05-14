@@ -26,10 +26,35 @@ export function getDatabase(): AppDatabase {
     sqlite.pragma('busy_timeout = 5000')
 
     db = drizzle(sqlite, { schema })
-    migrate(db, {
-      migrationsFolder: join(__dirname, 'migrations')
-    })
+    try {
+      migrate(db, {
+        migrationsFolder: join(__dirname, 'migrations')
+      })
+    } finally {
+      ensureProjectAssetIndexColumns(sqlite)
+    }
   }
 
   return db
+}
+
+function ensureProjectAssetIndexColumns(database: Database.Database): void {
+  const columns = new Set(
+    database
+      .prepare('PRAGMA table_info(project_assets)')
+      .all()
+      .map((column) => (column as { name: string }).name)
+  )
+
+  if (!columns.has('index_status')) {
+    database.prepare('ALTER TABLE project_assets ADD COLUMN index_status text').run()
+  }
+
+  if (!columns.has('index_updated_at')) {
+    database.prepare('ALTER TABLE project_assets ADD COLUMN index_updated_at integer').run()
+  }
+
+  if (!columns.has('index_error')) {
+    database.prepare('ALTER TABLE project_assets ADD COLUMN index_error text').run()
+  }
 }

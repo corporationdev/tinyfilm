@@ -3,6 +3,7 @@ import { z } from 'zod'
 
 export const projectStatusSchema = z.enum(['draft', 'missing', 'error'])
 export const assetTypeSchema = z.enum(['video', 'audio', 'image', 'other'])
+export const assetIndexStatusSchema = z.enum(['pending', 'ready', 'failed'])
 
 export const projectSchema = z.object({
   id: z.uuid(),
@@ -35,6 +36,9 @@ export const projectAssetSchema = z.object({
   durationMs: z.number().int().nullable(),
   width: z.number().int().nullable(),
   height: z.number().int().nullable(),
+  indexStatus: assetIndexStatusSchema.nullable(),
+  indexUpdatedAt: z.number().int().nullable(),
+  indexError: z.string().nullable(),
   createdAt: z.number().int()
 })
 
