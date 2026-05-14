@@ -1,5 +1,6 @@
 import { app, shell, BrowserWindow, ipcMain, Menu } from 'electron'
 import type { MenuItemConstructorOptions } from 'electron'
+import { readFileSync } from 'node:fs'
 import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
@@ -83,6 +84,22 @@ function createApplicationMenu(): void {
   Menu.setApplicationMenu(Menu.buildFromTemplate(template))
 }
 
+function registerFileDataUrlHandler(): void {
+  ipcMain.handle('app:file-data-url', (_event, filePath: string) => {
+    const extension = filePath.split('.').pop()?.toLowerCase()
+    const mimeType =
+      extension === 'png'
+        ? 'image/png'
+        : extension === 'webp'
+          ? 'image/webp'
+          : extension === 'gif'
+            ? 'image/gif'
+            : 'image/jpeg'
+
+    return `data:${mimeType};base64,${readFileSync(filePath).toString('base64')}`
+  })
+}
+
 // This method will be called when Electron has finished
 // initialization and is ready to create browser windows.
 // Some APIs can only be used after this event occurs.
@@ -99,6 +116,7 @@ app.whenReady().then(() => {
 
   // IPC test
   ipcMain.on('ping', () => console.log('pong'))
+  registerFileDataUrlHandler()
   registerRpcServer()
   createApplicationMenu()
 

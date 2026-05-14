@@ -55,6 +55,11 @@ export const projectAssetIdInputSchema = z.object({
   id: z.uuid()
 })
 
+export const renameProjectAssetInputSchema = z.object({
+  id: z.uuid(),
+  name: z.string().trim().min(1).max(255)
+})
+
 export const previewSessionSchema = z.object({
   projectId: z.uuid(),
   url: z.url(),
@@ -154,6 +159,7 @@ export const appContract = {
   assets: {
     listByProject: oc.input(projectIdInputSchema).output(z.array(projectAssetSchema)),
     importFiles: oc.input(importFilesInputSchema).output(z.array(projectAssetSchema)),
+    rename: oc.input(renameProjectAssetInputSchema).output(projectAssetSchema),
     remove: oc.input(projectAssetIdInputSchema).output(projectAssetIdInputSchema)
   },
   agents: {

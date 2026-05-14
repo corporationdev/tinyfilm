@@ -6,6 +6,7 @@ declare global {
     electron: ElectronAPI
     api: {
       getPathForFile: (file: File) => string
+      fileDataUrl: (filePath: string) => Promise<string>
       onNavigateSettings: (listener: () => void) => () => void
       onPiAgentEvent: (listener: (event: PiAgentUiEvent) => void) => () => void
     }

@@ -1,10 +1,15 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useMemo, useRef, useState } from 'react'
-import type { PiAgentChat, PiAgentTranscriptItem } from '../../../../shared/contracts/app'
+import type {
+  PiAgentChat,
+  PiAgentTranscriptItem,
+  ProjectAsset
+} from '../../../../shared/contracts/app'
 import { orpc } from '../../lib/orpc'
 import { AgentComposer } from './AgentComposer'
 import { AgentHeader } from './AgentHeader'
 import { AgentTranscript } from './AgentTranscript'
+import { AssetLibrary } from './AssetLibrary'
 import { GeminiKeyRequired } from './GeminiKeyRequired'
 import {
   isThinkingActivity,
@@ -25,6 +30,8 @@ export function AgentPanel(props: {
   const queryClient = useQueryClient()
   const [message, setMessage] = useState('')
   const [isHistoryOpen, setIsHistoryOpen] = useState(false)
+  const [assetsOpen, setAssetsOpen] = useState(false)
+  const [attachedAssets, setAttachedAssets] = useState<ProjectAsset[]>([])
   const [liveTranscript, setLiveTranscript] = useState<PiAgentTranscriptItem[] | null>(null)
   const [optimisticTranscript, setOptimisticTranscript] = useState<PiAgentTranscriptItem[]>([])
   const [expandedToolIds, setExpandedToolIds] = useState<Set<string>>(() => new Set())
@@ -37,6 +44,11 @@ export function AgentPanel(props: {
   const chatsQuery = useQuery(
     orpc.agents.listChats.queryOptions({
       input: { projectId }
+    })
+  )
+  const assetsQuery = useQuery(
+    orpc.assets.listByProject.queryOptions({
+      input: { id: projectId }
     })
   )
   const chats = useMemo(() => chatsQuery.data ?? [], [chatsQuery.data])
@@ -68,6 +80,28 @@ export function AgentPanel(props: {
     orpc.agents.sendMessage.mutationOptions({
       onSuccess: () => {
         setMessage('')
+        setAttachedAssets([])
+        void queryClient.invalidateQueries()
+      }
+    })
+  )
+  const importAssets = useMutation(
+    orpc.assets.importFiles.mutationOptions({
+      onSuccess: () => {
+        void queryClient.invalidateQueries()
+      }
+    })
+  )
+  const renameAsset = useMutation(
+    orpc.assets.rename.mutationOptions({
+      onSuccess: () => {
+        void queryClient.invalidateQueries()
+      }
+    })
+  )
+  const deleteAsset = useMutation(
+    orpc.assets.remove.mutationOptions({
+      onSuccess: () => {
         void queryClient.invalidateQueries()
       }
     })
@@ -85,15 +119,23 @@ export function AgentPanel(props: {
   ).filter(shouldShowTranscriptItem)
   const canCancel = selectedChat?.status === 'running' && Boolean(selectedSessionId)
   const canSend =
-    Boolean(message.trim()) && !canCancel && !createChat.isPending && !sendMessage.isPending
+    Boolean(message.trim()) &&
+    !canCancel &&
+    !createChat.isPending &&
+    !sendMessage.isPending &&
+    !importAssets.isPending
   const isAcceptingMessage = createChat.isPending || sendMessage.isPending
   const composerPlaceholder = 'Send a message...'
   const activeError =
     authStatusQuery.error ??
     chatsQuery.error ??
+    assetsQuery.error ??
     openChatQuery.error ??
     createChat.error ??
     sendMessage.error ??
+    importAssets.error ??
+    renameAsset.error ??
+    deleteAsset.error ??
     cancelRun.error
   const needsGeminiKey = !authStatusQuery.isPending && !authStatusQuery.data?.configured
   const currentChatTitle = selectedChat?.title ?? 'New chat'
@@ -118,6 +160,7 @@ export function AgentPanel(props: {
   useEffect(() => {
     queueMicrotask(() => {
       setMessage('')
+      setAttachedAssets([])
       setIsHistoryOpen(false)
       setLiveTranscript(null)
       if (optimisticSessionRef.current !== selectedSessionId) {
@@ -177,7 +220,8 @@ export function AgentPanel(props: {
       return
     }
 
-    const text = message.trim()
+    const userText = message.trim()
+    const text = messageForAgent(userText, attachedAssets)
     if (!text) {
       return
     }
@@ -212,7 +256,7 @@ export function AgentPanel(props: {
           (
             await createChat.mutateAsync({
               projectId,
-              title: titleFromMessage(text)
+              title: titleFromMessage(userText)
             })
           ).id
 
@@ -238,6 +282,7 @@ export function AgentPanel(props: {
 
   const handleNewChat = (): void => {
     setMessage('')
+    setAttachedAssets([])
     setIsHistoryOpen(false)
     setLiveTranscript(null)
     setOptimisticTranscript([])
@@ -249,15 +294,34 @@ export function AgentPanel(props: {
     onSelectChat(undefined)
   }
 
+  const importFilePaths = async (filePaths: string[], attachToDraft: boolean): Promise<void> => {
+    if (filePaths.length === 0 || importAssets.isPending) {
+      return
+    }
+
+    const assets = await importAssets.mutateAsync({ projectId, filePaths })
+
+    if (attachToDraft) {
+      setAttachedAssets((current) => mergeAssets(current, assets))
+    }
+  }
+
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
       <AgentHeader
         chats={chats}
         chatsPending={chatsQuery.isPending}
         historyOpen={isHistoryOpen}
+        assetsOpen={assetsOpen}
         newChatDisabled={createChat.isPending || sendMessage.isPending}
         selectedSessionId={selectedSessionId}
-        title={currentChatTitle}
+        title={assetsOpen ? 'Assets' : currentChatTitle}
+        onAssetsOpenChange={(open) => {
+          setAssetsOpen(open)
+          if (open) {
+            setIsHistoryOpen(false)
+          }
+        }}
         onHistoryOpenChange={setIsHistoryOpen}
         onNewChat={handleNewChat}
         onSelectChat={(sessionId) => {
@@ -272,47 +336,105 @@ export function AgentPanel(props: {
         </div>
       ) : null}
 
-      <AgentTranscript
-        expandedToolIds={expandedToolIds}
-        loading={openChatQuery.isPending}
-        scrollAnchorRef={transcriptEndRef}
-        selectedChat={selectedChat}
-        selectedSessionId={selectedSessionId}
-        transcript={transcript}
-        onToggleTool={(id) => {
-          setExpandedToolIds((current) => {
-            const next = new Set(current)
-            if (next.has(id)) {
-              next.delete(id)
-            } else {
-              next.add(id)
-            }
-            return next
-          })
-        }}
-      />
-
-      {needsGeminiKey ? (
-        <GeminiKeyRequired onOpenSettings={onOpenSettings} />
-      ) : (
-        <AgentComposer
-          cancelPending={cancelRun.isPending}
-          canCancel={canCancel}
-          canSend={canSend}
-          disabled={isAcceptingMessage}
-          message={message}
-          placeholder={composerPlaceholder}
-          sending={isAcceptingMessage}
-          onCancel={() => {
-            if (!selectedSessionId) {
-              return
-            }
-            cancelRun.mutate({ projectId, sessionId: selectedSessionId })
+      {assetsOpen ? (
+        <AssetLibrary
+          assets={assetsQuery.data ?? []}
+          error={assetsQuery.error ?? importAssets.error}
+          loading={assetsQuery.isPending}
+          uploadPending={importAssets.isPending || renameAsset.isPending || deleteAsset.isPending}
+          onDeleteAsset={(assetId) => {
+            deleteAsset.mutate({ id: assetId })
+            setAttachedAssets((assets) => assets.filter((asset) => asset.id !== assetId))
           }}
-          onMessageChange={setMessage}
-          onSubmit={handleSend}
+          onFilesDropped={(filePaths) => {
+            void importFilePaths(filePaths, false)
+          }}
+          onRenameAsset={(assetId, name) => {
+            renameAsset.mutate({ id: assetId, name })
+            setAttachedAssets((assets) =>
+              assets.map((asset) => (asset.id === assetId ? { ...asset, name } : asset))
+            )
+          }}
         />
+      ) : (
+        <>
+          <AgentTranscript
+            expandedToolIds={expandedToolIds}
+            loading={openChatQuery.isPending}
+            scrollAnchorRef={transcriptEndRef}
+            selectedChat={selectedChat}
+            selectedSessionId={selectedSessionId}
+            transcript={transcript}
+            onToggleTool={(id) => {
+              setExpandedToolIds((current) => {
+                const next = new Set(current)
+                if (next.has(id)) {
+                  next.delete(id)
+                } else {
+                  next.add(id)
+                }
+                return next
+              })
+            }}
+          />
+
+          {needsGeminiKey ? (
+            <GeminiKeyRequired onOpenSettings={onOpenSettings} />
+          ) : (
+            <AgentComposer
+              attachedAssets={attachedAssets}
+              cancelPending={cancelRun.isPending}
+              canCancel={canCancel}
+              canSend={canSend}
+              disabled={isAcceptingMessage}
+              message={message}
+              placeholder={composerPlaceholder}
+              sending={isAcceptingMessage}
+              uploadPending={importAssets.isPending}
+              onCancel={() => {
+                if (!selectedSessionId) {
+                  return
+                }
+                cancelRun.mutate({ projectId, sessionId: selectedSessionId })
+              }}
+              onFilesDropped={(filePaths) => {
+                void importFilePaths(filePaths, true)
+              }}
+              onMessageChange={setMessage}
+              onRemoveAttachedAsset={(assetId) => {
+                setAttachedAssets((assets) => assets.filter((asset) => asset.id !== assetId))
+              }}
+              onSubmit={handleSend}
+            />
+          )}
+        </>
       )}
     </div>
   )
+}
+
+function mergeAssets(current: ProjectAsset[], incoming: ProjectAsset[]): ProjectAsset[] {
+  const assets = [...current]
+  const seen = new Set(assets.map((asset) => asset.id))
+
+  for (const asset of incoming) {
+    if (!seen.has(asset.id)) {
+      assets.push(asset)
+      seen.add(asset.id)
+    }
+  }
+
+  return assets
+}
+
+function messageForAgent(userText: string, assets: ProjectAsset[]): string {
+  if (assets.length === 0) {
+    return userText
+  }
+
+  const assetLines = assets
+    .map((asset) => `- ${asset.name} (asset id: ${asset.id}, path: ${asset.relativePath})`)
+    .join('\n')
+
+  return `Attached assets:\n${assetLines}\n\nUser request:\n${userText}`
 }

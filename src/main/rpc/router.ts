@@ -3,7 +3,8 @@ import { appContract } from '../../shared/contracts/app'
 import {
   importProjectFiles,
   listProjectAssets,
-  removeProjectAsset
+  removeProjectAsset,
+  renameProjectAsset
 } from '../assets/assetRepository'
 import {
   cancelPiAgentRun,
@@ -41,6 +42,7 @@ export const appRouter = os.router({
       listProjectAssets({ projectId: input.id })
     ),
     importFiles: os.assets.importFiles.handler(({ input }) => importProjectFiles(input)),
+    rename: os.assets.rename.handler(({ input }) => renameProjectAsset(input)),
     remove: os.assets.remove.handler(({ input }) => removeProjectAsset(input))
   },
   agents: {

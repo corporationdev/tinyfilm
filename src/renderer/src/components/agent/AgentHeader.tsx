@@ -1,4 +1,4 @@
-import { Clock, Plus } from 'lucide-react'
+import { Clock, Folder, MessageSquare, Plus } from 'lucide-react'
 import type { PiAgentChat } from '../../../../shared/contracts/app'
 import { Button } from '../ui/button'
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover'
@@ -11,7 +11,9 @@ export function AgentHeader(props: {
   historyOpen: boolean
   selectedSessionId?: string
   newChatDisabled: boolean
+  assetsOpen: boolean
   onHistoryOpenChange: (open: boolean) => void
+  onAssetsOpenChange: (open: boolean) => void
   onSelectChat: (sessionId: string) => void
   onNewChat: () => void
 }): React.JSX.Element {
@@ -20,6 +22,19 @@ export function AgentHeader(props: {
       <div className="flex items-center justify-between gap-3">
         <h2 className="min-w-0 truncate text-sm font-medium text-zinc-200">{props.title}</h2>
         <div className="flex shrink-0 items-center gap-1">
+          <Button
+            size="icon"
+            title={props.assetsOpen ? 'Back to chat' : 'Assets'}
+            variant="ghost"
+            onClick={() => props.onAssetsOpenChange(!props.assetsOpen)}
+          >
+            {props.assetsOpen ? (
+              <MessageSquare className="size-4" />
+            ) : (
+              <Folder className="size-4" />
+            )}
+          </Button>
+
           <Popover open={props.historyOpen} onOpenChange={props.onHistoryOpenChange}>
             <PopoverTrigger asChild>
               <Button size="icon" title="Chat history" variant="ghost">

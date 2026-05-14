@@ -87,7 +87,6 @@ export function ProjectDetailPage(props: {
                 {previewSrcdocQuery.data && project ? (
                   <hyperframes-player
                     className="block aspect-[9/16] max-h-[76vh] w-full max-w-md overflow-hidden rounded bg-black"
-                    autoplay
                     controls
                     height={project.height}
                     muted

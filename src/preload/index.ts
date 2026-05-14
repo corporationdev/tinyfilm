@@ -5,6 +5,8 @@ import type { PiAgentUiEvent } from '../main/agents/piAgentEvents'
 // Custom APIs for renderer
 const api = {
   getPathForFile: (file: File): string => webUtils.getPathForFile(file),
+  fileDataUrl: (filePath: string): Promise<string> =>
+    ipcRenderer.invoke('app:file-data-url', filePath),
   onNavigateSettings: (listener: () => void): (() => void) => {
     const wrapped = (): void => {
       listener()

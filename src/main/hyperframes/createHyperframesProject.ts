@@ -39,8 +39,7 @@ export async function createHyperframesProject(input: {
     }
   )
 
-  mkdirSync(join(projectDir, 'assets', 'imports'), { recursive: true })
-  mkdirSync(join(projectDir, 'assets', 'generated'), { recursive: true })
+  mkdirSync(join(projectDir, 'assets'), { recursive: true })
   mkdirSync(join(projectDir, 'renders'), { recursive: true })
 
   const metadata = readCompositionMetadata(join(projectDir, defaultEntryPoint))
