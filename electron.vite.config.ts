@@ -45,6 +45,14 @@ export default defineConfig({
   },
   preload: {},
   renderer: {
+    build: {
+      rollupOptions: {
+        input: {
+          index: resolve('src/renderer/index.html'),
+          previewRecorder: resolve('src/renderer/preview-recorder.html')
+        }
+      }
+    },
     resolve: {
       alias: {
         '@': resolve('src/renderer/src'),

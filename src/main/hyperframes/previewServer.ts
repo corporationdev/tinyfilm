@@ -47,7 +47,7 @@ export async function startProjectPreview(input: { id: string }): Promise<Previe
       return
     }
 
-    const filePath = resolveRequestPath(rootPath, project.entryPoint, request.url ?? '/')
+    const filePath = resolvePreviewRequestPath(rootPath, project.entryPoint, request.url ?? '/')
 
     if (filePath === null || !existsSync(filePath)) {
       response.writeHead(404)
@@ -64,7 +64,7 @@ export async function startProjectPreview(input: { id: string }): Promise<Previe
       return
     }
 
-    serveFile(request, response, resolvedFilePath)
+    servePreviewFile(request, response, resolvedFilePath)
   })
 
   const port = await listen(server)
@@ -96,7 +96,7 @@ export async function stopAllProjectPreviews(): Promise<void> {
   await Promise.all(Array.from(previewServers.keys()).map((id) => stopProjectPreview({ id })))
 }
 
-function resolveRequestPath(
+export function resolvePreviewRequestPath(
   rootPath: string,
   entryPoint: string,
   requestUrl: string
@@ -152,7 +152,11 @@ function toPublicSession(session: ServerSession): PreviewSession {
   }
 }
 
-function serveFile(request: IncomingMessage, response: ServerResponse, filePath: string): void {
+export function servePreviewFile(
+  request: IncomingMessage,
+  response: ServerResponse,
+  filePath: string
+): void {
   const stats = statSync(filePath)
   const range = parseRangeHeader(request.headers.range, stats.size)
   const contentType = contentTypeForPath(filePath)

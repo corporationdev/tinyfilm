@@ -16,7 +16,9 @@ export function AgentComposer(props: {
 }): React.JSX.Element {
   const handleSubmit = (event: FormEvent<HTMLFormElement>): void => {
     event.preventDefault()
-    props.onSubmit()
+    if (props.canSend) {
+      props.onSubmit()
+    }
   }
 
   return (
@@ -55,14 +57,15 @@ export function AgentComposer(props: {
                 <Square className="size-4" />
               )}
             </Button>
-          ) : null}
-          <Button disabled={!props.canSend} size="icon" title="Send message" type="submit">
-            {props.sending ? (
-              <Loader2 className="size-4 animate-spin" />
-            ) : (
-              <Send className="size-4" />
-            )}
-          </Button>
+          ) : (
+            <Button disabled={!props.canSend} size="icon" title="Send a message" type="submit">
+              {props.sending ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : (
+                <Send className="size-4" />
+              )}
+            </Button>
+          )}
         </div>
       </div>
     </form>

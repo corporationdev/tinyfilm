@@ -1,10 +1,8 @@
-import { execFile } from 'node:child_process'
-import { access, mkdtemp, rm, stat } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
-import { basename, extname, isAbsolute, join, resolve } from 'node:path'
-import { promisify } from 'node:util'
+import { access, rm, stat } from 'node:fs/promises'
+import { basename, extname, isAbsolute, resolve } from 'node:path'
 import { FileState, GoogleGenAI, type File as GeminiFile } from '@google/genai'
 import type { ExtensionFactory } from '@earendil-works/pi-coding-agent'
+import { recordPreviewClip } from '../hyperframes/previewRecorder'
 
 interface PendingVideo {
   path: string
@@ -46,7 +44,6 @@ const supportedVideoMimeTypes = new Map<string, string>([
 ])
 
 const previewSource = 'preview'
-const execFileAsync = promisify(execFile)
 
 const videoParameterSchema = {
   type: 'object',
@@ -88,7 +85,7 @@ export function createPiVideoViewExtension(): ExtensionFactory {
       name: 'view_video',
       label: 'View video',
       description:
-        'View video natively with Gemini on the next reasoning turn. Use source "preview" to render and inspect the active Tinyfilm preview with audio, or use a local path to inspect any video file on this machine.',
+        'View video natively with Gemini on the next reasoning turn. Use source "preview" to record and inspect the active Tinyfilm preview with audio, or use a local path to inspect any video file on this machine.',
       promptSnippet:
         'view_video: View video natively with Gemini. Set source to "preview" for the active Tinyfilm preview, or to a local video file path.',
       promptGuidelines: [
@@ -217,7 +214,16 @@ async function resolveVideoSource(
   }
 
   if (source === previewSource) {
-    return renderPreviewVideo(cwd, params)
+    const recorded = await recordPreviewClip({
+      cwd,
+      startSeconds: params.startSeconds,
+      endSeconds: params.endSeconds,
+      fps: params.fps
+    })
+    return {
+      ...recorded,
+      useGeminiMetadata: false
+    }
   }
 
   const filePath = await resolveVideoPath(cwd, source)
@@ -245,103 +251,6 @@ async function resolveVideoPath(cwd: string, inputPath: string): Promise<string>
 
   mimeTypeForVideoPath(filePath)
   return filePath
-}
-
-async function renderPreviewVideo(
-  cwd: string,
-  params: ViewVideoParams
-): Promise<ResolvedVideoSource> {
-  const tempDir = await mkdtemp(join(tmpdir(), 'tinyfilm-preview-video-'))
-  const fullRenderPath = join(tempDir, 'preview-full.mp4')
-  const clipPath = join(tempDir, 'preview-clip.mp4')
-
-  try {
-    await execFileAsync(
-      'npx',
-      [
-        '--yes',
-        'hyperframes',
-        'render',
-        '--quiet',
-        '--format',
-        'mp4',
-        '--output',
-        fullRenderPath,
-        cwd
-      ],
-      {
-        cwd,
-        env: process.env,
-        maxBuffer: 1024 * 1024 * 20
-      }
-    )
-
-    const hasClipRange = params.startSeconds !== undefined || params.endSeconds !== undefined
-    if (!hasClipRange) {
-      return {
-        path: fullRenderPath,
-        mimeType: 'video/mp4',
-        displayName: 'preview.mp4',
-        cleanupDir: tempDir,
-        useGeminiMetadata: false
-      }
-    }
-
-    await clipVideo(fullRenderPath, clipPath, params)
-    return {
-      path: clipPath,
-      mimeType: 'video/mp4',
-      displayName: displayNameForPreviewClip(params),
-      cleanupDir: tempDir,
-      useGeminiMetadata: false
-    }
-  } catch (error) {
-    await rm(tempDir, { recursive: true, force: true })
-    throw error
-  }
-}
-
-async function clipVideo(
-  inputPath: string,
-  outputPath: string,
-  params: Pick<ViewVideoParams, 'startSeconds' | 'endSeconds'>
-): Promise<void> {
-  const args = ['-y']
-
-  if (params.startSeconds !== undefined) {
-    args.push('-ss', String(params.startSeconds))
-  }
-
-  args.push('-i', inputPath)
-
-  if (params.startSeconds !== undefined && params.endSeconds !== undefined) {
-    args.push('-t', String(params.endSeconds - params.startSeconds))
-  } else if (params.endSeconds !== undefined) {
-    args.push('-to', String(params.endSeconds))
-  }
-
-  args.push('-map', '0', '-c', 'copy', '-avoid_negative_ts', 'make_zero', outputPath)
-  await execFileAsync('ffmpeg', args, {
-    env: process.env,
-    maxBuffer: 1024 * 1024 * 20
-  })
-}
-
-function displayNameForPreviewClip(
-  params: Pick<ViewVideoParams, 'startSeconds' | 'endSeconds'>
-): string {
-  const start = params.startSeconds ?? 0
-  const end = params.endSeconds
-
-  if (end === undefined) {
-    return `preview-from-${formatSecondsForName(start)}s.mp4`
-  }
-
-  return `preview-${formatSecondsForName(start)}s-${formatSecondsForName(end)}s.mp4`
-}
-
-function formatSecondsForName(seconds: number): string {
-  return String(seconds).replace(/\./g, '_')
 }
 
 async function cleanupResolvedVideos(videos: PendingVideo[]): Promise<void> {

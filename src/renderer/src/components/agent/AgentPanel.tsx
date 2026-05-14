@@ -83,14 +83,11 @@ export function AgentPanel(props: {
     liveTranscript ?? openChatQuery.data?.transcript ?? [],
     optimisticTranscript
   ).filter(shouldShowTranscriptItem)
-  const canSend = Boolean(message.trim()) && !createChat.isPending && !sendMessage.isPending
   const canCancel = selectedChat?.status === 'running' && Boolean(selectedSessionId)
+  const canSend =
+    Boolean(message.trim()) && !canCancel && !createChat.isPending && !sendMessage.isPending
   const isAcceptingMessage = createChat.isPending || sendMessage.isPending
-  const composerPlaceholder = canCancel
-    ? 'Queue a follow-up...'
-    : selectedChat
-      ? 'Message Pi about this project...'
-      : 'Start a new agent chat...'
+  const composerPlaceholder = 'Send a message...'
   const activeError =
     authStatusQuery.error ??
     chatsQuery.error ??
@@ -176,6 +173,10 @@ export function AgentPanel(props: {
   }, [transcript])
 
   const handleSend = (): void => {
+    if (!canSend) {
+      return
+    }
+
     const text = message.trim()
     if (!text) {
       return
