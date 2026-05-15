@@ -3,6 +3,7 @@ dist
 out
 .DS_Store
 .eslintcache
+.venv
 *.log*
 package-lock.json
 yarn.lock

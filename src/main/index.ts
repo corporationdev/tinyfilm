@@ -1,17 +1,19 @@
-import { app, shell, BrowserWindow, ipcMain } from 'electron'
+import { app, shell, BrowserWindow, ipcMain, Menu } from 'electron'
+import type { MenuItemConstructorOptions } from 'electron'
+import { readFileSync } from 'node:fs'
 import { join } from 'path'
-import { electronApp, optimizer, is } from '@electron-toolkit/utils'
+import { electronApp, optimizer } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
-import { stopAllProjectPreviews } from './hyperframes/previewServer'
+import { startStudioApiServer, stopAllProjectPreviews } from './hyperframes/studioApiServer'
 import { registerRpcServer } from './rpc/server'
 
-function createWindow(): void {
+function createWindow(appUrl: string): void {
   // Create the browser window.
   const mainWindow = new BrowserWindow({
     width: 900,
     height: 670,
     show: false,
-    autoHideMenuBar: true,
+    autoHideMenuBar: false,
     ...(process.platform === 'linux' ? { icon } : {}),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
@@ -28,19 +30,80 @@ function createWindow(): void {
     return { action: 'deny' }
   })
 
-  // HMR for renderer base on electron-vite cli.
-  // Load the remote URL for development or the local html file for production.
-  if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
-    mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL'])
-  } else {
-    mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
+  mainWindow.loadURL(appUrl)
+}
+
+function createApplicationMenu(): void {
+  const fileMenu: MenuItemConstructorOptions = {
+    label: 'File',
+    submenu: [
+      {
+        label: 'Settings',
+        accelerator: 'CommandOrControl+,',
+        click: () => {
+          for (const window of BrowserWindow.getAllWindows()) {
+            window.webContents.send('app:navigate-settings')
+          }
+        }
+      },
+      { type: 'separator' },
+      process.platform === 'darwin' ? { role: 'close' } : { role: 'quit' }
+    ]
   }
+
+  const template: MenuItemConstructorOptions[] =
+    process.platform === 'darwin'
+      ? [
+          {
+            label: app.name,
+            submenu: [
+              { role: 'about' },
+              { type: 'separator' },
+              { role: 'services' },
+              { type: 'separator' },
+              { role: 'hide' },
+              { role: 'hideOthers' },
+              { role: 'unhide' },
+              { type: 'separator' },
+              { role: 'quit' }
+            ]
+          },
+          fileMenu,
+          { role: 'editMenu' },
+          { role: 'viewMenu' },
+          { role: 'windowMenu' }
+        ]
+      : [fileMenu, { role: 'editMenu' }, { role: 'viewMenu' }]
+
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template))
+}
+
+function registerFileDataUrlHandler(): void {
+  ipcMain.handle('app:file-data-url', (_event, filePath: string) => {
+    const extension = filePath.split('.').pop()?.toLowerCase()
+    const mimeType =
+      extension === 'png'
+        ? 'image/png'
+        : extension === 'webp'
+          ? 'image/webp'
+          : extension === 'gif'
+            ? 'image/gif'
+            : 'image/jpeg'
+
+    return `data:${mimeType};base64,${readFileSync(filePath).toString('base64')}`
+  })
+}
+
+function registerRevealInFolderHandler(): void {
+  ipcMain.handle('app:reveal-in-folder', (_event, filePath: string) => {
+    shell.showItemInFolder(filePath)
+  })
 }
 
 // This method will be called when Electron has finished
 // initialization and is ready to create browser windows.
 // Some APIs can only be used after this event occurs.
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   // Set app user model id for windows
   electronApp.setAppUserModelId('com.electron')
 
@@ -53,14 +116,18 @@ app.whenReady().then(() => {
 
   // IPC test
   ipcMain.on('ping', () => console.log('pong'))
+  registerFileDataUrlHandler()
+  registerRevealInFolderHandler()
   registerRpcServer()
+  createApplicationMenu()
+  const studioApi = await startStudioApiServer()
 
-  createWindow()
+  createWindow(studioApi.url)
 
   app.on('activate', function () {
     // On macOS it's common to re-create a window in the app when the
     // dock icon is clicked and there are no other windows open.
-    if (BrowserWindow.getAllWindows().length === 0) createWindow()
+    if (BrowserWindow.getAllWindows().length === 0) createWindow(studioApi.url)
   })
 })
 

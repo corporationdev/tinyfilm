@@ -7,30 +7,67 @@ import type { Plugin } from 'vite'
 
 function copyMainMigrations(): Plugin {
   return {
-    name: 'copy-main-migrations',
+    name: 'copy-main-assets',
     closeBundle() {
-      const source = resolve('src/main/db/migrations')
-      const destination = resolve('out/main/migrations')
+      const copies = [
+        ['src/main/db/migrations', 'out/main/migrations'],
+        ['src/main/assets/indexer', 'out/main/assets/indexer']
+      ] as const
 
-      if (!existsSync(source)) {
-        return
+      for (const [sourcePath, destinationPath] of copies) {
+        const source = resolve(sourcePath)
+        const destination = resolve(destinationPath)
+
+        if (!existsSync(source)) {
+          continue
+        }
+
+        cpSync(source, destination, { recursive: true })
       }
-
-      cpSync(source, destination, { recursive: true })
     }
   }
 }
 
 export default defineConfig({
   main: {
-    plugins: [copyMainMigrations()]
+    build: {
+      externalizeDeps: {
+        exclude: ['@hyperframes/core', 'hono']
+      },
+      rollupOptions: {
+        output: {
+          format: 'cjs'
+        }
+      }
+    },
+    plugins: [copyMainMigrations()],
+    ssr: {
+      noExternal: [
+        '@earendil-works/pi-coding-agent',
+        '@earendil-works/pi-agent-core',
+        '@earendil-works/pi-ai',
+        '@earendil-works/pi-tui'
+      ]
+    }
   },
   preload: {},
   renderer: {
+    publicDir: resolve('src/renderer/public'),
+    build: {
+      rollupOptions: {
+        input: {
+          index: resolve('src/renderer/index.html'),
+          previewRecorder: resolve('src/renderer/preview-recorder.html')
+        }
+      }
+    },
     resolve: {
       alias: {
         '@': resolve('src/renderer/src'),
-        '@renderer': resolve('src/renderer/src')
+        '@renderer': resolve('src/renderer/src'),
+        '@hyperframes/core/runtime/lottie-readiness': resolve(
+          'src/renderer/src/hyperframes/lottieReadiness.ts'
+        )
       }
     },
     plugins: [react(), tailwindcss()]

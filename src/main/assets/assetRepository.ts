@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto'
-import { copyFileSync, existsSync, mkdirSync, statSync } from 'node:fs'
-import { basename, extname, join, relative } from 'node:path'
+import { copyFileSync, existsSync, mkdirSync, rmSync, statSync } from 'node:fs'
+import { basename, dirname, extname, join, relative } from 'node:path'
 import { asc, eq } from 'drizzle-orm'
 import { getDatabase } from '../db/client'
 import { type ProjectAssetRow, projectAssets } from '../db/schema'
+import { prewarmTranscriptionCache } from '../agents/piTranscribeMediaExtension'
 import { getProject } from '../projects/projectRepository'
 
 export function listProjectAssets(input: { projectId: string }): ProjectAssetRow[] {
@@ -19,78 +20,98 @@ export function importProjectFiles(input: {
   projectId: string
   filePaths: string[]
 }): ProjectAssetRow[] {
-  const project = getProject({ id: input.projectId })
-  const importsDir = join(project.rootPath, 'assets', 'imports')
-  mkdirSync(importsDir, { recursive: true })
-
-  const imported = input.filePaths
+  return input.filePaths
     .filter((filePath) => filePath.trim().length > 0 && existsSync(filePath))
-    .map((filePath) => {
-      const now = Date.now()
-      const name = basename(filePath)
-      const assetPath = join(importsDir, uniqueAssetName(importsDir, name))
-      const stats = statSync(filePath)
+    .map((filePath) =>
+      registerProjectAssetFromPath({ projectId: input.projectId, sourcePath: filePath })
+    )
+}
 
-      copyFileSync(filePath, assetPath)
+export function registerProjectAssetFromPath(input: {
+  projectId: string
+  sourcePath: string
+  displayName?: string
+}): ProjectAssetRow {
+  const project = getProject({ id: input.projectId })
+  const assetsDir = join(project.rootPath, 'assets')
+  mkdirSync(assetsDir, { recursive: true })
 
-      const asset: ProjectAssetRow = {
-        id: randomUUID(),
-        projectId: project.id,
-        type: inferAssetType(filePath),
-        name,
-        originalPath: filePath,
-        assetPath,
-        relativePath: relative(project.rootPath, assetPath),
-        sizeBytes: stats.size,
-        mimeType: null,
-        durationMs: null,
-        width: null,
-        height: null,
-        createdAt: now
-      }
+  const sourcePath = input.sourcePath.trim()
+  const now = Date.now()
+  const id = randomUUID()
+  const name = input.displayName?.trim() || basename(sourcePath)
+  const assetPath = uniqueAssetPath(assetsDir, name)
+  const stats = statSync(sourcePath)
 
-      getDatabase().insert(projectAssets).values(asset).run()
+  copyFileSync(sourcePath, assetPath)
 
-      return asset
-    })
+  const asset: ProjectAssetRow = {
+    id,
+    projectId: project.id,
+    type: inferAssetType(sourcePath),
+    name,
+    originalPath: sourcePath,
+    assetPath,
+    relativePath: relative(project.rootPath, assetPath),
+    sizeBytes: stats.size,
+    mimeType: null,
+    durationMs: null,
+    width: null,
+    height: null,
+    indexStatus: null,
+    indexUpdatedAt: null,
+    indexError: null,
+    createdAt: now
+  }
 
-  return imported
+  getDatabase().insert(projectAssets).values(asset).run()
+  startAssetTranscriptionPrewarm(asset, project.rootPath)
+
+  return asset
 }
 
 export function removeProjectAsset(input: { id: string }): { id: string } {
+  const asset = getDatabase()
+    .select()
+    .from(projectAssets)
+    .where(eq(projectAssets.id, input.id))
+    .get()
+
+  if (!asset) {
+    throw new Error('Asset not found')
+  }
+
   const result = getDatabase().delete(projectAssets).where(eq(projectAssets.id, input.id)).run()
 
   if (result.changes === 0) {
     throw new Error('Asset not found')
   }
 
+  removeAssetFiles(asset)
+
   return input
 }
 
-function uniqueAssetName(directory: string, fileName: string): string {
-  const extension = extname(fileName)
-  const baseName = extension ? fileName.slice(0, -extension.length) : fileName
-  let candidate = sanitizeFileName(fileName)
-  let index = 1
+export function renameProjectAsset(input: { id: string; name: string }): ProjectAssetRow {
+  const name = input.name.trim()
 
-  while (existsSync(join(directory, candidate))) {
-    candidate = `${sanitizeFileName(baseName)}-${index}${extension}`
-    index += 1
+  if (!name) {
+    throw new Error('Asset name is required')
   }
 
-  return candidate
-}
+  getDatabase().update(projectAssets).set({ name }).where(eq(projectAssets.id, input.id)).run()
 
-function sanitizeFileName(fileName: string): string {
-  const extension = extname(fileName)
-  const baseName = extension ? fileName.slice(0, -extension.length) : fileName
-  const safeBaseName = baseName
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9._-]+/g, '-')
-    .replace(/^-+|-+$/g, '')
+  const asset = getDatabase()
+    .select()
+    .from(projectAssets)
+    .where(eq(projectAssets.id, input.id))
+    .get()
 
-  return `${safeBaseName || 'asset'}${extension.toLowerCase()}`
+  if (!asset) {
+    throw new Error('Asset not found')
+  }
+
+  return asset
 }
 
 function inferAssetType(filePath: string): ProjectAssetRow['type'] {
@@ -109,4 +130,87 @@ function inferAssetType(filePath: string): ProjectAssetRow['type'] {
   }
 
   return 'other'
+}
+
+function uniqueAssetPath(assetsDir: string, preferredName: string): string {
+  const parsedExtension = extname(preferredName)
+  const extension = parsedExtension.toLowerCase()
+  const baseName = basename(preferredName, parsedExtension).trim() || 'asset'
+  let candidate = join(assetsDir, `${baseName}${extension}`)
+  let suffix = 2
+
+  while (existsSync(candidate)) {
+    candidate = join(assetsDir, `${baseName}-${suffix}${extension}`)
+    suffix += 1
+  }
+
+  return candidate
+}
+
+function startAssetTranscriptionPrewarm(asset: ProjectAssetRow, projectRootPath: string): void {
+  if (asset.type !== 'audio' && asset.type !== 'video') {
+    return
+  }
+
+  getDatabase()
+    .update(projectAssets)
+    .set({
+      indexStatus: 'pending',
+      indexError: null,
+      indexUpdatedAt: Date.now()
+    })
+    .where(eq(projectAssets.id, asset.id))
+    .run()
+
+  void prewarmTranscriptionCache({
+    cwd: projectRootPath,
+    filePath: asset.assetPath
+  })
+    .then(() => {
+      getDatabase()
+        .update(projectAssets)
+        .set({
+          indexStatus: 'ready',
+          indexError: null,
+          indexUpdatedAt: Date.now()
+        })
+        .where(eq(projectAssets.id, asset.id))
+        .run()
+    })
+    .catch((error) => {
+      const message = error instanceof Error ? error.message : String(error)
+      getDatabase()
+        .update(projectAssets)
+        .set({
+          indexStatus: 'failed',
+          indexError: message,
+          indexUpdatedAt: Date.now()
+        })
+        .where(eq(projectAssets.id, asset.id))
+        .run()
+      console.warn('[assets:transcriptionPrewarmFailed]', {
+        id: asset.id,
+        path: asset.assetPath,
+        error: message
+      })
+    })
+}
+
+function removeAssetFiles(asset: ProjectAssetRow): void {
+  const assetDir = dirname(asset.assetPath)
+
+  try {
+    if (basename(assetDir) === asset.id) {
+      rmSync(assetDir, { force: true, recursive: true })
+      return
+    }
+
+    rmSync(asset.assetPath, { force: true })
+  } catch (error) {
+    console.warn('[assets:removeFilesFailed]', {
+      id: asset.id,
+      path: asset.assetPath,
+      error: error instanceof Error ? error.message : error
+    })
+  }
 }

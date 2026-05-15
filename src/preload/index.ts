@@ -1,9 +1,48 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
+import type { PiAgentUiEvent } from '../main/agents/piAgentEvents'
+import type { PreviewChangedEvent } from '../shared/contracts/app'
 
 // Custom APIs for renderer
 const api = {
-  getPathForFile: (file: File): string => webUtils.getPathForFile(file)
+  getPathForFile: (file: File): string => webUtils.getPathForFile(file),
+  fileDataUrl: (filePath: string): Promise<string> =>
+    ipcRenderer.invoke('app:file-data-url', filePath),
+  revealInFolder: (filePath: string): Promise<void> =>
+    ipcRenderer.invoke('app:reveal-in-folder', filePath),
+  onNavigateSettings: (listener: () => void): (() => void) => {
+    const wrapped = (): void => {
+      listener()
+    }
+
+    ipcRenderer.on('app:navigate-settings', wrapped)
+
+    return () => {
+      ipcRenderer.off('app:navigate-settings', wrapped)
+    }
+  },
+  onPiAgentEvent: (listener: (event: PiAgentUiEvent) => void): (() => void) => {
+    const wrapped = (_event: Electron.IpcRendererEvent, payload: PiAgentUiEvent): void => {
+      listener(payload)
+    }
+
+    ipcRenderer.on('pi-agent:event', wrapped)
+
+    return () => {
+      ipcRenderer.off('pi-agent:event', wrapped)
+    }
+  },
+  onPreviewChanged: (listener: (event: PreviewChangedEvent) => void): (() => void) => {
+    const wrapped = (_event: Electron.IpcRendererEvent, payload: PreviewChangedEvent): void => {
+      listener(payload)
+    }
+
+    ipcRenderer.on('preview:changed', wrapped)
+
+    return () => {
+      ipcRenderer.off('preview:changed', wrapped)
+    }
+  }
 }
 
 window.addEventListener('message', (event) => {

@@ -2,6 +2,7 @@ import { integer, sqliteTable, text } from 'drizzle-orm/sqlite-core'
 
 export const projectStatuses = ['draft', 'missing', 'error'] as const
 export const projectAssetTypes = ['video', 'audio', 'image', 'other'] as const
+export const projectAssetIndexStatuses = ['pending', 'ready', 'failed'] as const
 
 export const projects = sqliteTable('projects', {
   id: text('id').primaryKey(),
@@ -36,6 +37,9 @@ export const projectAssets = sqliteTable('project_assets', {
   durationMs: integer('duration_ms'),
   width: integer('width'),
   height: integer('height'),
+  indexStatus: text('index_status', { enum: projectAssetIndexStatuses }),
+  indexUpdatedAt: integer('index_updated_at'),
+  indexError: text('index_error'),
   createdAt: integer('created_at').notNull()
 })
 
