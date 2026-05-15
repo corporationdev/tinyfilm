@@ -8,6 +8,8 @@ const api = {
   getPathForFile: (file: File): string => webUtils.getPathForFile(file),
   fileDataUrl: (filePath: string): Promise<string> =>
     ipcRenderer.invoke('app:file-data-url', filePath),
+  revealInFolder: (filePath: string): Promise<void> =>
+    ipcRenderer.invoke('app:reveal-in-folder', filePath),
   onNavigateSettings: (listener: () => void): (() => void) => {
     const wrapped = (): void => {
       listener()

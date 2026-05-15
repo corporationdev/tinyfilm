@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { NLELayout } from '@hyperframes/studio'
-import { ArrowLeft, Loader2, Redo2, Trash2, Undo2 } from 'lucide-react'
-import { useCallback, useEffect, useState } from 'react'
+import { ArrowLeft, CheckCircle2, Download, Loader2, Redo2, Trash2, Undo2 } from 'lucide-react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { AgentPanel } from '../components/agent/AgentPanel'
 import { ErrorBanner } from '../components/common/ErrorBanner'
 import { Button } from '../components/ui/button'
@@ -17,6 +17,20 @@ export function ProjectDetailPage(props: {
   onSelectChat: (sessionId: string | undefined) => void
   onOpenSettings: () => void
 }): React.JSX.Element {
+  const [exportState, setExportState] = useState<{
+    status: 'idle' | 'rendering' | 'complete' | 'failed'
+    progress: number
+    stage: string | null
+    outputPath: string | null
+    error: string | null
+  }>({
+    status: 'idle',
+    progress: 0,
+    stage: null,
+    outputPath: null,
+    error: null
+  })
+  const exportEventSourceRef = useRef<EventSource | null>(null)
   const [previewState, setPreviewState] = useState(() => ({
     projectId: props.projectId,
     version: 0
@@ -52,6 +66,87 @@ export function ProjectDetailPage(props: {
     projectId: project?.id ?? null,
     onEdited: bumpPreviewVersion
   })
+  const handleExport = useCallback(async () => {
+    if (!project || exportState.status === 'rendering') {
+      return
+    }
+
+    exportEventSourceRef.current?.close()
+    setExportState({
+      status: 'rendering',
+      progress: 0,
+      stage: 'Starting export',
+      outputPath: null,
+      error: null
+    })
+
+    try {
+      const response = await fetch(`/api/projects/${project.id}/render`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          fps: project.fps,
+          quality: 'standard',
+          format: 'mp4'
+        })
+      })
+
+      if (!response.ok) {
+        throw new Error(`Export failed to start (${response.status})`)
+      }
+
+      const payload = (await response.json()) as { jobId?: string }
+      if (!payload.jobId) {
+        throw new Error('Export failed to start: missing render job id')
+      }
+
+      const outputPath = renderOutputPath(project.rootPath, `${payload.jobId}.mp4`)
+      const events = new EventSource(`/api/render/${payload.jobId}/progress`)
+      exportEventSourceRef.current = events
+
+      events.addEventListener('progress', (event) => {
+        const data = JSON.parse(event.data) as {
+          status?: 'rendering' | 'complete' | 'failed'
+          progress?: number
+          stage?: string
+          error?: string
+        }
+        const nextStatus =
+          data.status === 'complete' || data.status === 'failed' ? data.status : 'rendering'
+
+        setExportState({
+          status: nextStatus,
+          progress: data.progress ?? 0,
+          stage: data.stage ?? null,
+          outputPath: nextStatus === 'complete' ? outputPath : null,
+          error: data.error ?? null
+        })
+
+        if (nextStatus === 'complete' || nextStatus === 'failed') {
+          events.close()
+          exportEventSourceRef.current = null
+        }
+      })
+
+      events.onerror = () => {
+        events.close()
+        exportEventSourceRef.current = null
+        setExportState((state) => ({
+          ...state,
+          status: 'failed',
+          error: 'Lost connection to the HyperFrames render job.'
+        }))
+      }
+    } catch (error) {
+      setExportState({
+        status: 'failed',
+        progress: 0,
+        stage: null,
+        outputPath: null,
+        error: error instanceof Error ? error.message : 'Export failed'
+      })
+    }
+  }, [exportState.status, project])
 
   useEffect(() => {
     return window.api.onPreviewChanged((event) => {
@@ -66,6 +161,13 @@ export function ProjectDetailPage(props: {
     })
   }, [props.projectId])
 
+  useEffect(() => {
+    return () => {
+      exportEventSourceRef.current?.close()
+      exportEventSourceRef.current = null
+    }
+  }, [])
+
   return (
     <main className="flex h-svh flex-col overflow-hidden bg-zinc-950 text-zinc-100">
       <header className="flex h-16 shrink-0 items-center justify-between border-b border-zinc-800 px-5">
@@ -79,6 +181,50 @@ export function ProjectDetailPage(props: {
               {project?.title ?? 'Loading...'}
             </h1>
           </div>
+        </div>
+        <div className="flex min-w-0 items-center gap-3">
+          {exportState.status !== 'idle' ? (
+            <div className="hidden min-w-0 text-right sm:block">
+              <p className="truncate text-xs font-medium text-zinc-400">
+                {exportState.status === 'rendering'
+                  ? `Exporting ${Math.round(exportState.progress)}%`
+                  : exportState.status === 'complete'
+                    ? 'Export complete'
+                    : 'Export failed'}
+              </p>
+              <p className="max-w-72 truncate text-xs text-zinc-600">
+                {exportState.error ?? exportState.stage ?? exportState.outputPath}
+              </p>
+            </div>
+          ) : null}
+          {exportState.outputPath ? (
+            <Button
+              title="Reveal exported video in Finder"
+              variant="secondary"
+              onClick={() => {
+                if (!exportState.outputPath) return
+                void window.api.revealInFolder(exportState.outputPath)
+              }}
+            >
+              <CheckCircle2 className="size-4" />
+              Reveal
+            </Button>
+          ) : (
+            <Button
+              title="Export with HyperFrames"
+              disabled={!project || exportState.status === 'rendering'}
+              onClick={() => {
+                void handleExport()
+              }}
+            >
+              {exportState.status === 'rendering' ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : (
+                <Download className="size-4" />
+              )}
+              Export
+            </Button>
+          )}
         </div>
       </header>
 
@@ -186,4 +332,8 @@ export function ProjectDetailPage(props: {
       </section>
     </main>
   )
+}
+
+function renderOutputPath(projectRootPath: string, filename: string): string {
+  return `${projectRootPath.replace(/\/$/, '')}/renders/${filename}`
 }

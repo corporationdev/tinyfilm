@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process'
-import { existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { app } from 'electron'
@@ -41,6 +41,7 @@ export async function createHyperframesProject(input: {
 
   mkdirSync(join(projectDir, 'assets'), { recursive: true })
   mkdirSync(join(projectDir, 'renders'), { recursive: true })
+  writeProjectAgentInstructions(projectDir)
 
   const metadata = readCompositionMetadata(join(projectDir, defaultEntryPoint))
 
@@ -121,4 +122,26 @@ function slugify(title: string): string {
     .replace(/^-+|-+$/g, '')
 
   return slug || 'untitled-film'
+}
+
+function writeProjectAgentInstructions(projectDir: string): void {
+  const templatePath = resolveProjectTemplatePath('AGENTS.md')
+  const template = readFileSync(templatePath, 'utf8')
+  writeFileSync(join(projectDir, 'AGENTS.md'), template)
+}
+
+function resolveProjectTemplatePath(filename: string): string {
+  const candidates = [
+    join(process.cwd(), 'resources', 'project-template', filename),
+    join(app.getAppPath(), 'resources', 'project-template', filename),
+    join(process.resourcesPath, 'resources', 'project-template', filename),
+    join(process.resourcesPath, 'app.asar.unpacked', 'resources', 'project-template', filename)
+  ]
+
+  const templatePath = candidates.find((candidate) => existsSync(candidate))
+  if (!templatePath) {
+    throw new Error(`Missing project template ${filename}`)
+  }
+
+  return templatePath
 }

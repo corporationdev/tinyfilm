@@ -1,3 +1,4 @@
+import { spawn } from 'node:child_process'
 import { createReadStream, existsSync, statSync, watch, type FSWatcher } from 'node:fs'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { createRequire } from 'node:module'
@@ -131,13 +132,71 @@ async function startStudioApiServerInternal(): Promise<StudioApiSession> {
     lint: (html: string, opts?: { filePath?: string }) => lintHyperframeHtml(html, opts),
     runtimeUrl: '/api/runtime.js',
     rendersDir: (project) => join(project.dir, 'renders'),
-    startRender: (opts): RenderJobState => ({
-      id: opts.jobId,
-      status: 'failed',
-      progress: 100,
-      outputPath: opts.outputPath,
-      error: 'Rendering is not wired in Tinyfilm yet.'
-    })
+    startRender: (opts): RenderJobState => {
+      const state: RenderJobState = {
+        id: opts.jobId,
+        status: 'rendering',
+        progress: 5,
+        stage: 'Starting HyperFrames render',
+        outputPath: opts.outputPath
+      }
+      const args = [
+        '--yes',
+        'hyperframes@0.6.6',
+        'render',
+        opts.project.dir,
+        '--output',
+        opts.outputPath,
+        '--fps',
+        formatFps(opts.fps),
+        '--quality',
+        opts.quality,
+        '--format',
+        opts.format
+      ]
+
+      if (opts.outputResolution) {
+        args.push('--resolution', opts.outputResolution)
+      }
+
+      const child = spawn('npx', args, {
+        cwd: opts.project.dir,
+        env: process.env,
+        stdio: ['ignore', 'pipe', 'pipe']
+      })
+
+      child.stdout.setEncoding('utf8')
+      child.stderr.setEncoding('utf8')
+
+      child.stdout.on('data', (chunk: string) => {
+        updateRenderProgress(state, chunk)
+      })
+      child.stderr.on('data', (chunk: string) => {
+        updateRenderProgress(state, chunk)
+      })
+      child.on('error', (error) => {
+        state.status = 'failed'
+        state.progress = 100
+        state.stage = 'Render failed'
+        state.error = error.message
+      })
+      child.on('close', (code) => {
+        if (code === 0) {
+          state.status = 'complete'
+          state.progress = 100
+          state.stage = 'Render complete'
+          return
+        }
+
+        const failureDetails = state.stage
+        state.status = 'failed'
+        state.progress = 100
+        state.stage = 'Render failed'
+        state.error = failureDetails ?? `HyperFrames render exited with code ${code ?? 'unknown'}`
+      })
+
+      return state
+    }
   })
 
   const server = createServer((request, response) => {
@@ -154,6 +213,34 @@ async function startStudioApiServerInternal(): Promise<StudioApiSession> {
   registerStudioApiRequestRedirect(studioApiSession.url)
 
   return studioApiSession
+}
+
+function formatFps(fps: { num: number; den: number }): string {
+  return fps.den === 1 ? String(fps.num) : `${fps.num}/${fps.den}`
+}
+
+function updateRenderProgress(state: RenderJobState, chunk: string): void {
+  const message = chunk
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .at(-1)
+
+  if (!message) {
+    return
+  }
+
+  const percentMatch = message.match(/(\d{1,3})(?:\.\d+)?\s*%/)
+  if (percentMatch) {
+    const progress = Number(percentMatch[1])
+    if (Number.isFinite(progress)) {
+      state.progress = Math.min(99, Math.max(state.progress, progress))
+    }
+  } else if (state.progress < 90) {
+    state.progress += 1
+  }
+
+  state.stage = message
 }
 
 async function handleStudioApiRequest(

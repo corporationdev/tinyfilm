@@ -8,6 +8,7 @@ declare global {
     api: {
       getPathForFile: (file: File) => string
       fileDataUrl: (filePath: string) => Promise<string>
+      revealInFolder: (filePath: string) => Promise<void>
       onNavigateSettings: (listener: () => void) => () => void
       onPiAgentEvent: (listener: (event: PiAgentUiEvent) => void) => () => void
       onPreviewChanged: (listener: (event: PreviewChangedEvent) => void) => () => void
