@@ -4,8 +4,8 @@ import { basename, dirname, extname, join, relative } from 'node:path'
 import { asc, eq } from 'drizzle-orm'
 import { getDatabase } from '../db/client'
 import { type ProjectAssetRow, projectAssets } from '../db/schema'
+import { prewarmTranscriptionCache } from '../agents/piTranscribeMediaExtension'
 import { getProject } from '../projects/projectRepository'
-import { createVideoThumbnail, startAssetIndexing } from './assetIndexer'
 
 export function listProjectAssets(input: { projectId: string }): ProjectAssetRow[] {
   return getDatabase()
@@ -40,12 +40,9 @@ export function registerProjectAssetFromPath(input: {
   const now = Date.now()
   const id = randomUUID()
   const name = input.displayName?.trim() || basename(sourcePath)
-  const assetDir = join(assetsDir, id)
-  const extension = extname(sourcePath).toLowerCase()
-  const assetPath = join(assetDir, `original${extension}`)
+  const assetPath = uniqueAssetPath(assetsDir, name)
   const stats = statSync(sourcePath)
 
-  mkdirSync(assetDir, { recursive: true })
   copyFileSync(sourcePath, assetPath)
 
   const asset: ProjectAssetRow = {
@@ -68,8 +65,7 @@ export function registerProjectAssetFromPath(input: {
   }
 
   getDatabase().insert(projectAssets).values(asset).run()
-  createAssetThumbnail(asset)
-  startAssetIndexing(asset)
+  startAssetTranscriptionPrewarm(asset, project.rootPath)
 
   return asset
 }
@@ -136,18 +132,68 @@ function inferAssetType(filePath: string): ProjectAssetRow['type'] {
   return 'other'
 }
 
-function createAssetThumbnail(asset: ProjectAssetRow): void {
-  if (asset.type !== 'video') {
+function uniqueAssetPath(assetsDir: string, preferredName: string): string {
+  const parsedExtension = extname(preferredName)
+  const extension = parsedExtension.toLowerCase()
+  const baseName = basename(preferredName, parsedExtension).trim() || 'asset'
+  let candidate = join(assetsDir, `${baseName}${extension}`)
+  let suffix = 2
+
+  while (existsSync(candidate)) {
+    candidate = join(assetsDir, `${baseName}-${suffix}${extension}`)
+    suffix += 1
+  }
+
+  return candidate
+}
+
+function startAssetTranscriptionPrewarm(asset: ProjectAssetRow, projectRootPath: string): void {
+  if (asset.type !== 'audio' && asset.type !== 'video') {
     return
   }
 
-  void createVideoThumbnail(asset).catch((error) => {
-    console.warn('[assets:thumbnailFailed]', {
-      id: asset.id,
-      path: asset.assetPath,
-      error: error instanceof Error ? error.message : error
+  getDatabase()
+    .update(projectAssets)
+    .set({
+      indexStatus: 'pending',
+      indexError: null,
+      indexUpdatedAt: Date.now()
     })
+    .where(eq(projectAssets.id, asset.id))
+    .run()
+
+  void prewarmTranscriptionCache({
+    cwd: projectRootPath,
+    filePath: asset.assetPath
   })
+    .then(() => {
+      getDatabase()
+        .update(projectAssets)
+        .set({
+          indexStatus: 'ready',
+          indexError: null,
+          indexUpdatedAt: Date.now()
+        })
+        .where(eq(projectAssets.id, asset.id))
+        .run()
+    })
+    .catch((error) => {
+      const message = error instanceof Error ? error.message : String(error)
+      getDatabase()
+        .update(projectAssets)
+        .set({
+          indexStatus: 'failed',
+          indexError: message,
+          indexUpdatedAt: Date.now()
+        })
+        .where(eq(projectAssets.id, asset.id))
+        .run()
+      console.warn('[assets:transcriptionPrewarmFailed]', {
+        id: asset.id,
+        path: asset.assetPath,
+        error: message
+      })
+    })
 }
 
 function removeAssetFiles(asset: ProjectAssetRow): void {

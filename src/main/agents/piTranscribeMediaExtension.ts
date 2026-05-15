@@ -1,70 +1,106 @@
 import { execFile } from 'node:child_process'
-import { existsSync } from 'node:fs'
-import { mkdir, mkdtemp, rename, rm, writeFile } from 'node:fs/promises'
+import { existsSync, statSync } from 'node:fs'
+import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { basename, extname, isAbsolute, join, relative, resolve } from 'node:path'
+import { basename, extname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { promisify } from 'node:util'
 import type { ExtensionFactory } from '@earendil-works/pi-coding-agent'
-import {
-  transcribeFile,
-  type TranscriptionGranularity,
-  type TranscriptionResult
-} from '../assets/assetIndexer'
-import { recordPreviewClip } from '../hyperframes/previewRecorder'
 
 const execFileAsync = promisify(execFile)
-const previewSource = 'preview'
+const defaultModel = 'small'
+const cacheVersion = 1
+const pendingTranscriptions = new Map<string, Promise<TranscribeMediaFileResult>>()
 
 const transcribeParameterSchema = {
   type: 'object',
   additionalProperties: false,
-  required: ['source'],
+  required: ['filePath'],
   properties: {
-    source: {
+    filePath: {
       type: 'string',
       description:
-        'Media source to transcribe. Use "preview" for the active Tinyfilm preview, or provide a local audio/video file path relative to the project root or absolute.'
+        'Audio/video file path to transcribe. Provide a path relative to the project root or an absolute local path.'
     },
-    startSeconds: {
-      type: 'number',
-      description:
-        'Optional start offset in seconds. Returned timestamps remain relative to the original source/preview timeline.'
-    },
-    endSeconds: {
-      type: 'number',
-      description:
-        'Optional end offset in seconds. Must be greater than startSeconds when both are provided.'
-    },
-    granularity: {
+    model: {
       type: 'string',
-      enum: ['word', 'segment'],
       description:
-        'Transcript timestamp detail. Defaults to "word", which is best for captions. Use "segment" for smaller rough transcripts.'
+        'Whisper model to use. Defaults to "small". Use ".en" models only when the audio is explicitly English.'
+    },
+    language: {
+      type: 'string',
+      description:
+        'Optional language code such as en, es, or ja. Omit to let Whisper auto-detect with the multilingual model.'
     }
   }
 } as const
 
 interface TranscribeMediaParams {
-  source: string
-  startSeconds?: number
-  endSeconds?: number
-  granularity?: TranscriptionGranularity
+  filePath: string
+  model?: string
+  language?: string
 }
 
-type TranscriptArtifact = {
-  version: 1
-  source: string
-  sourcePath?: string
+interface TranscriptWord {
+  id?: string
+  text: string
+  start: number
+  end: number
+}
+
+interface HyperframesTranscribeResult {
+  ok: boolean
+  error?: string
+  model?: string
+  wordCount?: number
+  durationSeconds?: number
+  speechOnsetSeconds?: number | null
+  transcriptPath?: string
+}
+
+interface TranscriptFingerprint {
+  sizeBytes: number
+  mtimeMs: number
+}
+
+interface TranscriptCacheOptions {
+  model: string
+  language: string | null
+}
+
+interface TranscriptCacheEntry {
+  sourcePath: string
+  fingerprint: TranscriptFingerprint
+  options: TranscriptCacheOptions
+  transcriptPath: string
+  wordCount: number
+  durationSeconds: number | null
   createdAt: string
-  granularity: TranscriptionGranularity
-  range: {
-    startMs: number
-    endMs: number | null
-  }
-  staleWarning: string
+  updatedAt: string
+}
+
+interface TranscriptCacheIndex {
+  version: typeof cacheVersion
+  entries: TranscriptCacheEntry[]
+}
+
+interface TranscribeMediaFileResult {
+  cached: boolean
+  sourcePath: string
+  transcriptPath: string
+  absoluteTranscriptPath: string
+  model: string
+  language: string | null
+  wordCount: number
+  durationSeconds: number | null
+}
+
+export async function prewarmTranscriptionCache(input: {
+  cwd: string
+  filePath: string
+  model?: string
   language?: string
-  languageProbability?: number
-  segments: TranscriptionResult['segments']
+}): Promise<TranscribeMediaFileResult> {
+  return transcribeMediaFile(input)
 }
 
 export function createPiTranscribeMediaExtension(): ExtensionFactory {
@@ -73,126 +109,135 @@ export function createPiTranscribeMediaExtension(): ExtensionFactory {
       name: 'transcribe_media',
       label: 'Transcribe media',
       description:
-        'Transcribe an audio/video file or the active Tinyfilm preview and save the transcript JSON under .tinyfilm/transcripts. Use this for captions and timestamped transcript data.',
+        'Transcribe an audio/video file with the HyperFrames CLI and save a cached word-level transcript under .tinyfilm/transcripts.',
       promptSnippet:
-        'transcribe_media: Transcribe an audio/video file or "preview" to .tinyfilm/transcripts/*.json. Defaults to word-level timestamps for captions.',
+        'transcribe_media: Transcribe a local audio/video file path to .tinyfilm/transcripts/*.json. Uses HyperFrames and caches by path, size, mtime, model, and language.',
       promptGuidelines: [
         'Use transcribe_media when you need transcript/caption data, not when you need visual inspection.',
-        'Use source "preview" to transcribe the current rendered Tinyfilm preview after edits.',
-        'The tool saves a timestamped JSON artifact and returns its path. Preview transcripts are snapshots; regenerate after edits that affect timing or audio.',
-        'Returned transcript timestamps are relative to the original source or preview timeline, even when startSeconds is nonzero.'
+        'Pass a concrete media file path. To transcribe a preview, render/export it first and pass that output path.',
+        'The tool returns a cached transcript when the same file path, size, mtime, model, and language were already transcribed.',
+        'Default model is "small". Use ".en" models only when the audio is explicitly English.'
       ],
       parameters: transcribeParameterSchema,
       executionMode: 'sequential',
       async execute(_toolCallId, params: TranscribeMediaParams, _signal, _onUpdate, ctx) {
         validateTranscribeOptions(params)
-        const granularity = params.granularity ?? 'word'
-        const resolved = await resolveTranscriptionSource(ctx.cwd, params)
+        const result = await transcribeMediaFile({
+          cwd: ctx.cwd,
+          filePath: params.filePath,
+          model: params.model,
+          language: params.language
+        })
 
-        try {
-          const transcript = await transcribeFile(resolved.path, {
-            granularity,
-            offsetMs: Math.round((params.startSeconds ?? 0) * 1000)
-          })
-          const artifact = await writeTranscriptArtifact(ctx.cwd, {
-            version: 1,
-            source: params.source.trim(),
-            ...(resolved.sourcePath ? { sourcePath: relative(ctx.cwd, resolved.sourcePath) } : {}),
-            createdAt: new Date().toISOString(),
-            granularity,
-            range: {
-              startMs: Math.round((params.startSeconds ?? 0) * 1000),
-              endMs: params.endSeconds === undefined ? null : Math.round(params.endSeconds * 1000)
-            },
-            staleWarning:
-              params.source.trim() === previewSource
-                ? 'This transcript is a snapshot of the preview at creation time. Regenerate after edits that affect timing or audio.'
-                : 'This transcript is a snapshot of the source media at creation time.',
-            language: transcript.language,
-            languageProbability: transcript.languageProbability,
-            segments: transcript.segments
-          })
-          const wordCount = transcript.segments.reduce((count, segment) => {
-            return (
-              count + (segment.words?.length ?? segment.text.split(/\s+/).filter(Boolean).length)
-            )
-          }, 0)
-
-          return {
-            content: [
-              {
-                type: 'text',
-                text: [
-                  `Transcript saved to ${artifact.relativePath}`,
-                  `Granularity: ${granularity}`,
-                  `Segments: ${transcript.segments.length}`,
-                  `Words: ${wordCount}`,
-                  'Preview transcripts are snapshots; regenerate after edits that affect timing or audio.'
-                ].join('\n')
-              }
-            ],
-            details: {
-              source: params.source.trim(),
-              transcriptPath: artifact.relativePath,
-              absoluteTranscriptPath: artifact.absolutePath,
-              granularity,
-              segmentCount: transcript.segments.length,
-              wordCount,
-              startMs: Math.round((params.startSeconds ?? 0) * 1000),
-              endMs: params.endSeconds === undefined ? null : Math.round(params.endSeconds * 1000)
-            }
-          }
-        } finally {
-          await cleanupResolvedSource(resolved)
-        }
+        return transcriptToolResult(result)
       }
     })
   }
 }
 
-async function resolveTranscriptionSource(
-  cwd: string,
-  params: TranscribeMediaParams
-): Promise<{ path: string; sourcePath?: string; cleanupDir?: string }> {
-  const source = params.source.trim()
-  if (!source) {
-    throw new Error('Media source is required')
-  }
-
-  if (source === previewSource) {
-    const recorded = await recordPreviewClip({
-      cwd,
-      startSeconds: params.startSeconds,
-      endSeconds: params.endSeconds
-    })
-    return {
-      path: recorded.path,
-      cleanupDir: recorded.cleanupDir
-    }
-  }
-
-  const filePath = await resolveMediaPath(cwd, source)
+async function transcribeMediaFile(input: {
+  cwd: string
+  filePath: string
+  model?: string
+  language?: string
+}): Promise<TranscribeMediaFileResult> {
+  const filePath = resolveMediaPath(input.cwd, input.filePath)
   assertTranscribablePath(filePath)
 
-  if (params.startSeconds === undefined && params.endSeconds === undefined) {
+  const model = input.model?.trim() || defaultModel
+  const language = input.language?.trim() || null
+  const sourcePath = sourcePathForCache(input.cwd, filePath)
+  const fingerprint = fingerprintFile(filePath)
+  const cache = await loadTranscriptCache(input.cwd)
+  const cached = findCachedTranscript(cache.index, {
+    sourcePath,
+    fingerprint,
+    options: { model, language }
+  })
+
+  if (cached && existsSync(cachePathToAbsolute(input.cwd, cached.transcriptPath))) {
     return {
-      path: filePath,
-      sourcePath: filePath
+      cached: true,
+      sourcePath,
+      transcriptPath: cached.transcriptPath,
+      absoluteTranscriptPath: cachePathToAbsolute(input.cwd, cached.transcriptPath),
+      model,
+      language,
+      wordCount: cached.wordCount,
+      durationSeconds: cached.durationSeconds
     }
   }
 
-  const tempDir = await mkdtemp(join(tmpdir(), 'tinyfilm-transcribe-media-'))
-  const clippedPath = join(tempDir, `clip${audioExtensionForSource(filePath)}`)
-  await extractAudioClip(filePath, clippedPath, params)
+  const pendingKey = transcriptCacheKey({
+    sourcePath,
+    fingerprint,
+    options: { model, language }
+  })
+  const pending = pendingTranscriptions.get(pendingKey)
+  if (pending) {
+    return pending
+  }
+
+  const promise = transcribeAndCacheMediaFile({
+    cwd: input.cwd,
+    filePath,
+    sourcePath,
+    fingerprint,
+    options: { model, language }
+  }).finally(() => {
+    pendingTranscriptions.delete(pendingKey)
+  })
+  pendingTranscriptions.set(pendingKey, promise)
+
+  return promise
+}
+
+async function transcribeAndCacheMediaFile(input: {
+  cwd: string
+  filePath: string
+  sourcePath: string
+  fingerprint: TranscriptFingerprint
+  options: TranscriptCacheOptions
+}): Promise<TranscribeMediaFileResult> {
+  const transcribed = await transcribeWithHyperframes(input.cwd, input.filePath, input.options)
+  const transcript = await writeCachedTranscript(input.cwd, {
+    sourcePath: input.sourcePath,
+    fingerprint: input.fingerprint,
+    options: input.options,
+    words: transcribed.words,
+    durationSeconds: transcribed.durationSeconds ?? null
+  })
+  const cache = await loadTranscriptCache(input.cwd)
+  cache.index.entries = upsertCacheEntry(cache.index.entries, transcript.entry)
+  await writeTranscriptCacheIndex(cache.indexPath, cache.index)
 
   return {
-    path: clippedPath,
-    sourcePath: filePath,
-    cleanupDir: tempDir
+    cached: false,
+    sourcePath: input.sourcePath,
+    transcriptPath: transcript.entry.transcriptPath,
+    absoluteTranscriptPath: transcript.absolutePath,
+    model: input.options.model,
+    language: input.options.language,
+    wordCount: transcript.entry.wordCount,
+    durationSeconds: transcript.entry.durationSeconds
   }
 }
 
-async function resolveMediaPath(cwd: string, inputPath: string): Promise<string> {
+function transcriptCacheKey(input: {
+  sourcePath: string
+  fingerprint: TranscriptFingerprint
+  options: TranscriptCacheOptions
+}): string {
+  return [
+    input.sourcePath,
+    input.fingerprint.sizeBytes,
+    input.fingerprint.mtimeMs,
+    input.options.model,
+    input.options.language ?? 'auto'
+  ].join('\0')
+}
+
+function resolveMediaPath(cwd: string, inputPath: string): string {
   const trimmed = inputPath.trim()
   if (!trimmed) {
     throw new Error('Media path is required')
@@ -206,88 +251,17 @@ async function resolveMediaPath(cwd: string, inputPath: string): Promise<string>
   return filePath
 }
 
-async function extractAudioClip(
-  inputPath: string,
-  outputPath: string,
-  params: Pick<TranscribeMediaParams, 'startSeconds' | 'endSeconds'>
-): Promise<void> {
-  const ffmpegPath = resolveFfmpegPath()
-  if (!ffmpegPath) {
-    throw new Error('ffmpeg executable was not found. Install ffmpeg to transcribe time ranges.')
-  }
-
-  await execFileAsync(
-    ffmpegPath,
-    [
-      '-y',
-      ...(params.startSeconds !== undefined ? ['-ss', String(params.startSeconds)] : []),
-      '-i',
-      inputPath,
-      ...(params.endSeconds !== undefined
-        ? ['-t', String(params.endSeconds - (params.startSeconds ?? 0))]
-        : []),
-      '-vn',
-      '-ac',
-      '1',
-      '-ar',
-      '16000',
-      outputPath
-    ],
-    { maxBuffer: 1024 * 1024 * 20 }
-  )
-}
-
-async function writeTranscriptArtifact(
-  cwd: string,
-  artifact: TranscriptArtifact
-): Promise<{ absolutePath: string; relativePath: string }> {
-  const transcriptsDir = join(cwd, '.tinyfilm', 'transcripts')
-  await mkdir(transcriptsDir, { recursive: true })
-  const sourceName =
-    artifact.source === previewSource ? 'preview' : basename(artifact.sourcePath ?? artifact.source)
-  const fileName = `${slugify(sourceName)}-${slugify(artifact.createdAt)}.json`
-  const absolutePath = join(transcriptsDir, fileName)
-  const tempPath = `${absolutePath}.${Date.now()}.tmp`
-  await writeFile(tempPath, `${JSON.stringify(artifact, null, 2)}\n`, 'utf8')
-  await rename(tempPath, absolutePath)
-
-  return {
-    absolutePath,
-    relativePath: relative(cwd, absolutePath)
-  }
-}
-
-async function cleanupResolvedSource(resolved: { cleanupDir?: string }): Promise<void> {
-  if (!resolved.cleanupDir) {
-    return
-  }
-
-  await rm(resolved.cleanupDir, { recursive: true, force: true })
-}
-
 function validateTranscribeOptions(input: TranscribeMediaParams): void {
-  if (input.startSeconds !== undefined && input.startSeconds < 0) {
-    throw new Error('startSeconds must be 0 or greater')
+  if (!input.filePath?.trim()) {
+    throw new Error('filePath is required')
   }
 
-  if (input.endSeconds !== undefined && input.endSeconds <= 0) {
-    throw new Error('endSeconds must be greater than 0')
+  if (input.model !== undefined && !input.model.trim()) {
+    throw new Error('model must not be empty')
   }
 
-  if (
-    input.startSeconds !== undefined &&
-    input.endSeconds !== undefined &&
-    input.endSeconds <= input.startSeconds
-  ) {
-    throw new Error('endSeconds must be greater than startSeconds')
-  }
-
-  if (
-    input.granularity !== undefined &&
-    input.granularity !== 'word' &&
-    input.granularity !== 'segment'
-  ) {
-    throw new Error('granularity must be "word" or "segment"')
+  if (input.language !== undefined && !input.language.trim()) {
+    throw new Error('language must not be empty')
   }
 }
 
@@ -313,43 +287,346 @@ function assertTranscribablePath(filePath: string): void {
   }
 }
 
-function audioExtensionForSource(filePath: string): string {
-  const extension = extname(filePath).toLowerCase()
-  return extension === '.wav' ? '.wav' : '.m4a'
+function fingerprintFile(filePath: string): TranscriptFingerprint {
+  const stats = statSync(filePath)
+  return {
+    sizeBytes: stats.size,
+    mtimeMs: Math.round(stats.mtimeMs)
+  }
 }
 
-function resolveFfmpegPath(): string | null {
-  const candidates = [
-    '/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg',
-    '/usr/local/opt/ffmpeg-full/bin/ffmpeg',
-    '/opt/homebrew/bin/ffmpeg',
-    '/usr/local/bin/ffmpeg',
-    '/usr/bin/ffmpeg',
-    'ffmpeg'
-  ]
+function sourcePathForCache(cwd: string, filePath: string): string {
+  const relativePath = relative(cwd, filePath)
 
-  for (const candidate of candidates) {
-    try {
-      if (candidate.includes('/')) {
-        if (existsSync(candidate)) {
-          return candidate
-        }
-        continue
-      }
+  if (relativePath && !relativePath.startsWith('..') && !relativePath.startsWith(sep)) {
+    return normalizePathSeparators(relativePath)
+  }
 
-      return candidate
-    } catch {
-      // Try the next common install location.
+  return normalizePathSeparators(filePath)
+}
+
+async function loadTranscriptCache(cwd: string): Promise<{
+  index: TranscriptCacheIndex
+  indexPath: string
+  transcriptsDir: string
+}> {
+  const transcriptsDir = join(cwd, '.tinyfilm', 'transcripts')
+  await mkdir(transcriptsDir, { recursive: true })
+
+  const indexPath = join(transcriptsDir, 'index.json')
+  if (!existsSync(indexPath)) {
+    return {
+      index: { version: cacheVersion, entries: [] },
+      indexPath,
+      transcriptsDir
     }
   }
 
-  return null
+  try {
+    const parsed = JSON.parse(await readFile(indexPath, 'utf8')) as Partial<TranscriptCacheIndex>
+    return {
+      index: {
+        version: cacheVersion,
+        entries: Array.isArray(parsed.entries) ? parsed.entries : []
+      },
+      indexPath,
+      transcriptsDir
+    }
+  } catch {
+    return {
+      index: { version: cacheVersion, entries: [] },
+      indexPath,
+      transcriptsDir
+    }
+  }
+}
+
+function findCachedTranscript(
+  index: TranscriptCacheIndex,
+  input: {
+    sourcePath: string
+    fingerprint: TranscriptFingerprint
+    options: TranscriptCacheOptions
+  }
+): TranscriptCacheEntry | null {
+  return (
+    index.entries.find((entry) => {
+      return (
+        entry.sourcePath === input.sourcePath &&
+        entry.fingerprint.sizeBytes === input.fingerprint.sizeBytes &&
+        entry.fingerprint.mtimeMs === input.fingerprint.mtimeMs &&
+        entry.options.model === input.options.model &&
+        entry.options.language === input.options.language
+      )
+    }) ?? null
+  )
+}
+
+async function transcribeWithHyperframes(
+  cwd: string,
+  filePath: string,
+  options: TranscriptCacheOptions
+): Promise<HyperframesTranscribeResult & { transcriptPath: string; words: TranscriptWord[] }> {
+  const tempDir = await mkdtemp(join(tmpdir(), 'tinyfilm-hyperframes-transcribe-'))
+  const executable = resolveHyperframesExecutable(cwd)
+
+  try {
+    const { stdout } = await execFileAsync(
+      executable.command,
+      [
+        ...executable.prefixArgs,
+        'transcribe',
+        filePath,
+        '--dir',
+        tempDir,
+        '--json',
+        '--model',
+        options.model,
+        ...(options.language ? ['--language', options.language] : [])
+      ],
+      {
+        cwd,
+        maxBuffer: 1024 * 1024 * 20,
+        timeout: 1000 * 60 * 15
+      }
+    )
+    const result = parseHyperframesJson(stdout)
+
+    if (!result.ok) {
+      throw new Error(result.error ?? 'HyperFrames transcription failed')
+    }
+
+    if (!result.transcriptPath) {
+      throw new Error('HyperFrames did not return a transcript path')
+    }
+
+    const words = await readTranscriptWords(result.transcriptPath)
+
+    return {
+      ...result,
+      transcriptPath: result.transcriptPath,
+      words
+    }
+  } finally {
+    await rm(tempDir, { recursive: true, force: true })
+  }
+}
+
+function resolveHyperframesExecutable(cwd: string): { command: string; prefixArgs: string[] } {
+  const localBin = join(
+    cwd,
+    'node_modules',
+    '.bin',
+    process.platform === 'win32' ? 'hyperframes.cmd' : 'hyperframes'
+  )
+  const repoBin = join(
+    process.cwd(),
+    'node_modules',
+    '.bin',
+    process.platform === 'win32' ? 'hyperframes.cmd' : 'hyperframes'
+  )
+
+  if (existsSync(localBin)) {
+    return { command: localBin, prefixArgs: [] }
+  }
+
+  if (existsSync(repoBin)) {
+    return { command: repoBin, prefixArgs: [] }
+  }
+
+  return {
+    command: 'npx',
+    prefixArgs: ['--yes', 'hyperframes@0.6.7']
+  }
+}
+
+function parseHyperframesJson(stdout: string): HyperframesTranscribeResult {
+  const lines = stdout
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    try {
+      return JSON.parse(lines[index]) as HyperframesTranscribeResult
+    } catch {
+      // Keep looking for the JSON status line.
+    }
+  }
+
+  throw new Error('HyperFrames did not emit machine-readable JSON output')
+}
+
+async function readTranscriptWords(transcriptPath: string): Promise<TranscriptWord[]> {
+  const parsed = JSON.parse(await readFile(transcriptPath, 'utf8')) as unknown
+
+  if (!Array.isArray(parsed)) {
+    throw new Error('HyperFrames transcript output was not a word array')
+  }
+
+  return parsed.map((word, index) => normalizeTranscriptWord(word, index))
+}
+
+function normalizeTranscriptWord(value: unknown, index: number): TranscriptWord {
+  if (!value || typeof value !== 'object') {
+    throw new Error(`Invalid transcript word at index ${index}`)
+  }
+
+  const word = value as Partial<TranscriptWord>
+  if (typeof word.text !== 'string') {
+    throw new Error(`Invalid transcript word text at index ${index}`)
+  }
+
+  if (typeof word.start !== 'number' || typeof word.end !== 'number') {
+    throw new Error(`Invalid transcript word timing at index ${index}`)
+  }
+
+  return {
+    id: typeof word.id === 'string' && word.id ? word.id : `w${index}`,
+    text: word.text,
+    start: word.start,
+    end: word.end
+  }
+}
+
+async function writeCachedTranscript(
+  cwd: string,
+  input: {
+    sourcePath: string
+    fingerprint: TranscriptFingerprint
+    options: TranscriptCacheOptions
+    words: TranscriptWord[]
+    durationSeconds: number | null
+  }
+): Promise<{ absolutePath: string; entry: TranscriptCacheEntry }> {
+  const transcriptsDir = join(cwd, '.tinyfilm', 'transcripts')
+  await mkdir(transcriptsDir, { recursive: true })
+
+  const fileName = `${slugify(input.sourcePath)}-${slugify(input.options.model)}-${
+    input.options.language ? slugify(input.options.language) : 'auto'
+  }.json`
+  const absolutePath = join(transcriptsDir, fileName)
+  const relativePath = normalizePathSeparators(relative(cwd, absolutePath))
+  const now = new Date().toISOString()
+  const existingCreatedAt = await findExistingCreatedAt(cwd, input, relativePath)
+  const tempPath = `${absolutePath}.${Date.now()}.tmp`
+
+  await writeFile(tempPath, `${JSON.stringify(input.words, null, 2)}\n`, 'utf8')
+  await rename(tempPath, absolutePath)
+
+  return {
+    absolutePath,
+    entry: {
+      sourcePath: input.sourcePath,
+      fingerprint: input.fingerprint,
+      options: input.options,
+      transcriptPath: relativePath,
+      wordCount: input.words.length,
+      durationSeconds: input.durationSeconds,
+      createdAt: existingCreatedAt ?? now,
+      updatedAt: now
+    }
+  }
+}
+
+async function findExistingCreatedAt(
+  cwd: string,
+  input: {
+    sourcePath: string
+    options: TranscriptCacheOptions
+  },
+  transcriptPath: string
+): Promise<string | null> {
+  const cache = await loadTranscriptCache(cwd)
+  return (
+    cache.index.entries.find((entry) => {
+      return (
+        entry.sourcePath === input.sourcePath &&
+        entry.transcriptPath === transcriptPath &&
+        entry.options.model === input.options.model &&
+        entry.options.language === input.options.language
+      )
+    })?.createdAt ?? null
+  )
+}
+
+function upsertCacheEntry(
+  entries: TranscriptCacheEntry[],
+  nextEntry: TranscriptCacheEntry
+): TranscriptCacheEntry[] {
+  const nextEntries = entries.filter((entry) => {
+    return !(
+      entry.sourcePath === nextEntry.sourcePath &&
+      entry.options.model === nextEntry.options.model &&
+      entry.options.language === nextEntry.options.language
+    )
+  })
+  nextEntries.push(nextEntry)
+  nextEntries.sort((left, right) => left.sourcePath.localeCompare(right.sourcePath))
+  return nextEntries
+}
+
+async function writeTranscriptCacheIndex(
+  indexPath: string,
+  index: TranscriptCacheIndex
+): Promise<void> {
+  const tempPath = `${indexPath}.${Date.now()}.tmp`
+  await writeFile(tempPath, `${JSON.stringify(index, null, 2)}\n`, 'utf8')
+  await rename(tempPath, indexPath)
+}
+
+function transcriptToolResult(input: {
+  cached: boolean
+  sourcePath: string
+  transcriptPath: string
+  absoluteTranscriptPath: string
+  model: string
+  language: string | null
+  wordCount: number
+  durationSeconds: number | null
+}): {
+  content: Array<{ type: 'text'; text: string }>
+  details: Record<string, unknown>
+} {
+  return {
+    content: [
+      {
+        type: 'text',
+        text: [
+          `${input.cached ? 'Cached transcript' : 'Transcript saved'} to ${input.transcriptPath}`,
+          `Source: ${input.sourcePath}`,
+          `Model: ${input.model}`,
+          `Language: ${input.language ?? 'auto'}`,
+          `Words: ${input.wordCount}`
+        ].join('\n')
+      }
+    ],
+    details: {
+      cached: input.cached,
+      sourcePath: input.sourcePath,
+      transcriptPath: input.transcriptPath,
+      absoluteTranscriptPath: input.absoluteTranscriptPath,
+      model: input.model,
+      language: input.language,
+      wordCount: input.wordCount,
+      durationSeconds: input.durationSeconds
+    }
+  }
+}
+
+function cachePathToAbsolute(cwd: string, cachePath: string): string {
+  return isAbsolute(cachePath) ? cachePath : resolve(cwd, cachePath)
+}
+
+function normalizePathSeparators(path: string): string {
+  return path.replace(/\\/g, '/')
 }
 
 function slugify(value: string): string {
   const slug = value
     .trim()
     .toLowerCase()
+    .replace(extname(basename(value)), '')
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '')
 
