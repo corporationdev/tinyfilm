@@ -1,10 +1,13 @@
 import { useQuery } from '@tanstack/react-query'
-import { ArrowLeft, FileVideo, Loader2 } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { NLELayout } from '@hyperframes/studio'
+import { ArrowLeft, Loader2, Redo2, Trash2, Undo2 } from 'lucide-react'
+import { useCallback, useEffect, useState } from 'react'
 import { AgentPanel } from '../components/agent/AgentPanel'
 import { ErrorBanner } from '../components/common/ErrorBanner'
 import { Button } from '../components/ui/button'
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from '../components/ui/resizable'
+import { useTinyfilmRenderClipContent } from '../hyperframes/useTinyfilmRenderClipContent'
+import { useTinyfilmTimelineEditing } from '../hyperframes/useTinyfilmTimelineEditing'
 import { orpc } from '../lib/orpc'
 
 export function ProjectDetailPage(props: {
@@ -18,6 +21,7 @@ export function ProjectDetailPage(props: {
     projectId: props.projectId,
     version: 0
   }))
+  const [compIdToSrc, setCompIdToSrc] = useState(() => new Map<string, string>())
   const projectQuery = useQuery(
     orpc.projects.get.queryOptions({
       input: { id: props.projectId }
@@ -32,26 +36,22 @@ export function ProjectDetailPage(props: {
 
   const project = projectQuery.data
   const previewVersion = previewState.projectId === props.projectId ? previewState.version : 0
-  const previewSrcdocQuery = useQuery({
-    queryKey: ['project-preview-srcdoc', previewQuery.data?.url, previewVersion],
-    queryFn: async () => {
-      if (!previewQuery.data?.url) {
-        throw new Error('Preview URL is missing')
-      }
-
-      const response = await fetch(withPreviewVersion(previewQuery.data.url, previewVersion), {
-        cache: 'no-store'
-      })
-
-      if (!response.ok) {
-        throw new Error('Preview HTML failed to load')
-      }
-
-      return withBaseElement(await response.text(), previewQuery.data.url)
-    },
-    enabled: Boolean(previewQuery.data?.url)
-  })
   const activeError = projectQuery.error ?? previewQuery.error
+  const bumpPreviewVersion = useCallback(() => {
+    setPreviewState((state) => ({
+      projectId: props.projectId,
+      version: (state.projectId === props.projectId ? state.version : 0) + 1
+    }))
+  }, [props.projectId])
+  const renderClipContent = useTinyfilmRenderClipContent({
+    projectId: project?.id ?? null,
+    compIdToSrc,
+    effectiveTimelineDuration: project?.durationMs ? project.durationMs / 1000 : 0
+  })
+  const timelineEditing = useTinyfilmTimelineEditing({
+    projectId: project?.id ?? null,
+    onEdited: bumpPreviewVersion
+  })
 
   useEffect(() => {
     return window.api.onPreviewChanged((event) => {
@@ -92,12 +92,7 @@ export function ProjectDetailPage(props: {
                 projectId={props.projectId}
                 selectedSessionId={props.selectedSessionId}
                 onSelectChat={props.onSelectChat}
-                onRunCompleted={() => {
-                  setPreviewState((state) => ({
-                    projectId: props.projectId,
-                    version: (state.projectId === props.projectId ? state.version : 0) + 1
-                  }))
-                }}
+                onRunCompleted={bumpPreviewVersion}
                 onOpenSettings={props.onOpenSettings}
               />
             </aside>
@@ -105,30 +100,81 @@ export function ProjectDetailPage(props: {
 
           <ResizableHandle />
 
-          <ResizablePanel className="min-h-0" minSize="420px">
-            <section className="flex h-full min-h-0 flex-col overflow-hidden">
-              <div className="flex flex-1 items-center justify-center overflow-hidden">
-                {previewSrcdocQuery.data && project ? (
-                  <hyperframes-player
-                    className="block aspect-[9/16] max-h-[76vh] w-full max-w-md overflow-hidden rounded bg-black"
-                    controls
-                    height={project.height}
+          <ResizablePanel className="min-w-0 min-h-0" minSize="420px">
+            <section className="flex h-full min-w-0 min-h-0 flex-col overflow-hidden">
+              <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden [&>*]:h-full [&>*]:w-full">
+                {previewQuery.data && project ? (
+                  <NLELayout
                     key={`${project.id}:${previewVersion}`}
-                    muted
-                    srcdoc={previewSrcdocQuery.data}
-                    width={project.width}
+                    projectId={project.id}
+                    portrait={project.height >= project.width}
+                    refreshKey={previewVersion}
+                    renderClipContent={renderClipContent}
+                    onCompIdToSrcChange={setCompIdToSrc}
+                    onMoveElement={timelineEditing.handleTimelineElementMove}
+                    onResizeElement={timelineEditing.handleTimelineElementResize}
+                    onDeleteElement={timelineEditing.handleTimelineElementDelete}
+                    timelineToolbar={
+                      <div className="flex h-10 items-center justify-between px-3">
+                        <div className="text-[10px] font-medium uppercase tracking-[0.16em] text-neutral-500">
+                          Timeline
+                        </div>
+                        <div className="flex items-center gap-1">
+                          <Button
+                            size="icon-xs"
+                            title={
+                              timelineEditing.undoLabel
+                                ? `Undo ${timelineEditing.undoLabel}`
+                                : 'Undo'
+                            }
+                            variant="ghost"
+                            disabled={!timelineEditing.canUndo}
+                            onClick={() => {
+                              void timelineEditing.handleUndo()
+                            }}
+                          >
+                            <Undo2 className="size-3.5" />
+                          </Button>
+                          <Button
+                            size="icon-xs"
+                            title={
+                              timelineEditing.redoLabel
+                                ? `Redo ${timelineEditing.redoLabel}`
+                                : 'Redo'
+                            }
+                            variant="ghost"
+                            disabled={!timelineEditing.canRedo}
+                            onClick={() => {
+                              void timelineEditing.handleRedo()
+                            }}
+                          >
+                            <Redo2 className="size-3.5" />
+                          </Button>
+                          <Button
+                            size="icon-xs"
+                            title="Delete selected clip"
+                            variant="ghost"
+                            disabled={!timelineEditing.selectedElement}
+                            onClick={() => {
+                              if (!timelineEditing.selectedElement) return
+                              void timelineEditing.handleTimelineElementDelete(
+                                timelineEditing.selectedElement
+                              )
+                            }}
+                          >
+                            <Trash2 className="size-3.5" />
+                          </Button>
+                        </div>
+                      </div>
+                    }
                   />
                 ) : (
-                  <div className="flex aspect-[9/16] max-h-[70vh] w-full max-w-sm items-center justify-center rounded bg-zinc-950 text-center">
+                  <div className="flex flex-1 items-center justify-center bg-zinc-950 text-center">
                     <div className="px-8">
-                      {previewQuery.isPending || previewSrcdocQuery.isPending ? (
-                        <Loader2 className="mx-auto mb-4 size-10 animate-spin text-zinc-700" />
-                      ) : (
-                        <FileVideo className="mx-auto mb-4 size-10 text-zinc-700" />
-                      )}
+                      <Loader2 className="mx-auto mb-4 size-10 animate-spin text-zinc-700" />
                       <h2 className="text-sm font-medium text-zinc-300">Loading preview</h2>
                       <p className="mt-2 text-sm text-zinc-500">
-                        Tinyfilm is starting a local HyperFrames preview for this project.
+                        Tinyfilm is starting the HyperFrames Studio preview for this project.
                       </p>
                     </div>
                   </div>
@@ -140,28 +186,4 @@ export function ProjectDetailPage(props: {
       </section>
     </main>
   )
-}
-
-function withPreviewVersion(previewUrl: string, version: number): string {
-  const url = new URL(previewUrl)
-  url.searchParams.set('tinyfilmPreviewVersion', String(version))
-  return url.toString()
-}
-
-function withBaseElement(html: string, previewUrl: string): string {
-  const base = `<base href="${escapeHtmlAttribute(previewUrl)}" />`
-
-  if (/<base\b/i.test(html)) {
-    return html
-  }
-
-  if (/<head\b[^>]*>/i.test(html)) {
-    return html.replace(/<head\b[^>]*>/i, (match) => `${match}\n    ${base}`)
-  }
-
-  return `${base}\n${html}`
-}
-
-function escapeHtmlAttribute(value: string): string {
-  return value.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;')
 }

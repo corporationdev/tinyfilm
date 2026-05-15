@@ -32,7 +32,7 @@ export default defineConfig({
   main: {
     build: {
       externalizeDeps: {
-        exclude: []
+        exclude: ['@hyperframes/core', 'hono']
       },
       rollupOptions: {
         output: {
@@ -52,6 +52,7 @@ export default defineConfig({
   },
   preload: {},
   renderer: {
+    publicDir: resolve('src/renderer/public'),
     build: {
       rollupOptions: {
         input: {
@@ -63,7 +64,10 @@ export default defineConfig({
     resolve: {
       alias: {
         '@': resolve('src/renderer/src'),
-        '@renderer': resolve('src/renderer/src')
+        '@renderer': resolve('src/renderer/src'),
+        '@hyperframes/core/runtime/lottie-readiness': resolve(
+          'src/renderer/src/hyperframes/lottieReadiness.ts'
+        )
       }
     },
     plugins: [react(), tailwindcss()]

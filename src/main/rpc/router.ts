@@ -23,7 +23,7 @@ import {
   removeProject
 } from '../projects/projectRepository'
 import { createHyperframesProject } from '../hyperframes/createHyperframesProject'
-import { startProjectPreview, stopProjectPreview } from '../hyperframes/previewServer'
+import { startProjectPreview, stopProjectPreview } from '../hyperframes/studioApiServer'
 
 const os = implement(appContract)
 

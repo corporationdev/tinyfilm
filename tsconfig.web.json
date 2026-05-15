@@ -17,6 +17,9 @@
       ],
       "@renderer/*": [
         "src/renderer/src/*"
+      ],
+      "@hyperframes/studio": [
+        "src/renderer/src/types/hyperframes-studio-shim.d.ts"
       ]
     }
   }
